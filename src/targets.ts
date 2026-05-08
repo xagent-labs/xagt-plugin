@@ -18,21 +18,21 @@ export const SUPPORTED_TARGETS: readonly InstallTarget[] = [
     id: "cursor",
     label: "Cursor project skill",
     base: "cwd",
-    skillDirectory: ".cursor/skills/xagent-setup",
+    skillDirectory: ".cursor/skills/xagt-setup",
     notes: "Installs the skill into the current workspace for Cursor."
   },
   {
     id: "claude-code",
     label: "Claude Code user skill",
     base: "home",
-    skillDirectory: ".claude/skills/xagent-setup",
+    skillDirectory: ".claude/skills/xagt-setup",
     notes: "Installs the skill into the Claude-compatible user skill directory."
   },
   {
     id: "generic",
     label: "AgentSkills-compatible user skill",
     base: "home",
-    skillDirectory: ".agents/skills/xagent-setup",
+    skillDirectory: ".agents/skills/xagt-setup",
     notes: "Installs into AgentSkills-compatible user directory used by OpenClaw and similar runtimes."
   }
 ];

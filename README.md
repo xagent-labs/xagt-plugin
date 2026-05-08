@@ -6,18 +6,18 @@ One command. Browser opens, you log in (= registered), OKX skill suite installs 
 npx @xagt/agent-plugin@latest setup --target all
 ```
 
-Or install globally so you can run `xagent-plugin <cmd>` directly later:
+Or install globally so you can run `xagt-plugin <cmd>` directly later:
 
 ```bash
 npm i -g @xagt/agent-plugin
-xagent-plugin setup --target all
+xagt-plugin setup --target all
 ```
 
 Need to switch accounts later?
 
 ```bash
-xagent-plugin logout
-xagent-plugin login
+xagt-plugin logout
+xagt-plugin login
 ```
 
 Hackathon kicks off **May 11, 2026**. Node `>= 18.17` required.
@@ -40,7 +40,7 @@ After login + install, your agent (Cursor / Claude Code / OpenClaw / any AgentSk
 Verify you're set up:
 
 ```bash
-xagent-plugin doctor
+xagt-plugin doctor
 ```
 
 Prints session status, expiry, backend, and runtime versions.
@@ -63,7 +63,7 @@ Prints session status, expiry, backend, and runtime versions.
 
 | Layer            | Owned by                | What it does                                                  | What you do                                  |
 |------------------|-------------------------|---------------------------------------------------------------|----------------------------------------------|
-| Identity         | XAgent (us)             | Knows who the hacker is. Registers entries.                   | `xagent-plugin login` — once.                |
+| Identity         | XAgent (us)             | Knows who the hacker is. Registers entries.                   | `xagt-plugin login` — once.                |
 | Wallet / writes  | OKX agentic wallet      | User signs, swaps, transfers, pays gas.                       | Have your end-users connect their OKX wallet.|
 | Intelligence     | Agent runtime + OKX skills | LLM matches "find me trending memes" → `okx-dex-trenches` etc. | Just chat; the runtime routes.               |
 | Product          | **You**                 | UX, niche, business logic.                                    | Code it.                                     |
@@ -102,13 +102,13 @@ The agent does the on-chain work. You design the experience.
 
 ## Eligibility
 
-To qualify for judging, you **must** complete `xagent-plugin setup --target all` (or `xagent-plugin login`) so you have an XAgent participant ID. Your submission file is named after that ID — judges only count submissions whose participant ID corresponds to a real XAgent account.
+To qualify for judging, you **must** complete `xagt-plugin setup --target all` (or `xagt-plugin login`) so you have an XAgent participant ID. Your submission file is named after that ID — judges only count submissions whose participant ID corresponds to a real XAgent account.
 
 Each participant ID owns one folder under `projects/`. Re-submitting overwrites the existing one (open a fresh PR to update before the deadline).
 
 Required for a valid submission:
 
-- ✅ Registered via `xagent-plugin setup --target all` (or `xagent-plugin login`)
+- ✅ Registered via `xagt-plugin setup --target all` (or `xagt-plugin login`)
 - ✅ Project uses **at least one** OKX skill (DEX, wallet, DeFi, signal, market, security, dApp routing, etc.)
 - ✅ A public GitHub repo with your source code
 - ✅ A one-line description of what it does
@@ -123,7 +123,7 @@ Optional but encouraged:
 One command:
 
 ```bash
-xagent-plugin submit
+xagt-plugin submit
 ```
 
 Asks you for:
@@ -135,21 +135,21 @@ Asks you for:
   Deployed URL (optional, blank to skip): https://t.me/my_trading_bot
 ```
 
-Then your browser opens GitHub at the right URL with the submission file pre-filled. Click **"Propose new file"** → GitHub forks `xerpa-ai/xagent-plugin` to your account and opens the PR for you. **Click "Create pull request" and you're done.**
+Then your browser opens GitHub at the right URL with the submission file pre-filled. Click **"Propose new file"** → GitHub forks `xerpa-ai/xagt-plugin` to your account and opens the PR for you. **Click "Create pull request" and you're done.**
 
 The file lands at `projects/<your-participant-id>/README.md`. Judges merge accepted submissions.
 
 Or scripted (CI / Makefile):
 
 ```bash
-xagent-plugin submit \
+xagt-plugin submit \
   --name "AI Trading Telegram Bot" \
   --intro "TG bot that swaps via OKX wallet, gated by smart-money signals" \
   --repo "https://github.com/alice/ai-trading-bot" \
   --deploy "https://t.me/my_trading_bot"
 ```
 
-Lost your local credentials? Run `xagent-plugin login` again with the same XAgent account — your participant ID stays stable, so your existing submission folder stays yours.
+Lost your local credentials? Run `xagt-plugin login` again with the same XAgent account — your participant ID stays stable, so your existing submission folder stays yours.
 
 ## Get help
 
@@ -162,16 +162,16 @@ In-person at the venue. No Discord, no Telegram. Pull a mentor over.
 ### Commands
 
 ```bash
-xagent-plugin setup     [--target all|cursor|claude-code|generic] [--dry-run] [--no-browser] [--skip-substep]
+xagt-plugin setup     [--target all|cursor|claude-code|generic] [--dry-run] [--no-browser] [--skip-substep]
                           # one-shot: registers + installs OKX skills
-xagent-plugin submit    [--name <s>] [--intro <s>] [--repo <url>] [--deploy <url>]
+xagt-plugin submit    [--name <s>] [--intro <s>] [--repo <url>] [--deploy <url>]
                           # opens GitHub in browser to submit (requires login)
-xagent-plugin login     [--no-browser]    # re-login or switch accounts
-xagent-plugin logout                      # clear local credentials
-xagent-plugin install   [--target ...]    # install skills only (no login)
-xagent-plugin doctor                      # login + runtime status
-xagent-plugin report    [--target ...]    # resend install report
-xagent-plugin print-skill                 # print SKILL.md to stdout
+xagt-plugin login     [--no-browser]    # re-login or switch accounts
+xagt-plugin logout                      # clear local credentials
+xagt-plugin install   [--target ...]    # install skills only (no login)
+xagt-plugin doctor                      # login + runtime status
+xagt-plugin report    [--target ...]    # resend install report
+xagt-plugin print-skill                 # print SKILL.md to stdout
 ```
 
 Hackathon path: `setup --target all` → build → `submit`. Switch accounts with `logout` then `login`.
@@ -180,12 +180,12 @@ Hackathon path: `setup --target all` → build → `submit`. Switch accounts wit
 
 | Target        | Path                                            |
 |---------------|-------------------------------------------------|
-| `cursor`      | `<workspace>/.cursor/skills/xagent-setup/`      |
-| `claude-code` | `~/.claude/skills/xagent-setup/`                |
-| `generic`     | `~/.agents/skills/xagent-setup/` (AgentSkills, OpenClaw) |
+| `cursor`      | `<workspace>/.cursor/skills/xagt-setup/`      |
+| `claude-code` | `~/.claude/skills/xagt-setup/`                |
+| `generic`     | `~/.agents/skills/xagt-setup/` (AgentSkills, OpenClaw) |
 | `all`         | all of the above                                |
 
-Credentials at `~/.config/xagent/credentials.json` (`%APPDATA%\xagent\credentials.json` on Windows), `chmod 600`.
+Credentials at `~/.config/xagt/credentials.json` (`%APPDATA%\xagt\credentials.json` on Windows), `chmod 600`.
 
 ### Troubleshooting
 
@@ -194,7 +194,7 @@ Credentials at `~/.config/xagent/credentials.json` (`%APPDATA%\xagent\credential
 | `npx ... setup` exits 0 with no output   | You hit `0.1.0`. Pin `@latest` or `npx clear-npx-cache`.          |
 | Browser opens but never returns          | Frontend allowlist missing host. See `docs/SETUP_FLOW.md`.        |
 | `EACCES` writing to `~/.claude/skills/`  | Wrong user. Don't `sudo`.                                         |
-| `command not found: xagent-plugin`       | Not globally installed. Run `npm i -g @xagt/agent-plugin`.        |
+| `command not found: xagt-plugin`       | Not globally installed. Run `npm i -g @xagt/agent-plugin`.        |
 
 
 License: UNLICENSED — XerpaAI internal tooling, hackathon use granted.

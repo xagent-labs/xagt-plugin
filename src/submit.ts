@@ -38,12 +38,12 @@ export interface SubmitResult {
 
 export class NotRegisteredError extends Error {
   constructor() {
-    super("not registered — run `xagent-plugin login` first");
+    super("not registered — run `xagt-plugin login` first");
     this.name = "NotRegisteredError";
   }
 }
 
-const DEFAULT_REPO = "xerpa-ai/xagent-plugin";
+const DEFAULT_REPO = "xerpa-ai/xagt-plugin";
 const DEFAULT_BRANCH = "main";
 
 export async function runSubmit(options: SubmitOptions): Promise<SubmitResult> {
@@ -140,7 +140,7 @@ export function renderMarkdown(payload: SubmitPayload, cliVersion: string): stri
   return `# ${payload.name}
 
 **Participant ID:** \`${payload.participantId}\`
-**Submitted via:** \`xagent-plugin@${cliVersion}\`
+**Submitted via:** \`xagt-plugin@${cliVersion}\`
 **Submitted at:** ${submittedAt}
 
 ## Description

@@ -19,7 +19,7 @@ export interface InstallResult {
 }
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const bundledSkillPath = join(packageRoot, "skills", "xagent-setup", "SKILL.md");
+const bundledSkillPath = join(packageRoot, "skills", "xagt-setup", "SKILL.md");
 
 export async function installSkills(options: InstallOptions): Promise<InstallResult[]> {
   const cwd = options.cwd ?? process.cwd();

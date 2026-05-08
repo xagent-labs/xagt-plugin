@@ -1,5 +1,5 @@
 ---
-name: xagent-setup
+name: xagt-setup
 description: Use when setting up XAgent integration, logging into XAgent, installing the required plugin-store skill, or reporting agent installation status.
 ---
 
