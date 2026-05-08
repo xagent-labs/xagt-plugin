@@ -131,7 +131,7 @@ export async function runCli(args: string[]): Promise<number> {
 
   if (command.command === "print-skill") {
     const skill = await readFile(
-      join(packageRoot, "skills", "xagent-setup", "SKILL.md"),
+      join(packageRoot, "skills", "xagt-setup", "SKILL.md"),
       "utf8"
     );
     process.stdout.write(skill);
@@ -147,7 +147,7 @@ export async function runCli(args: string[]): Promise<number> {
     process.stdout.write(`Frontend: ${resolveFrontendBase()}\n`);
     const creds = await loadCredentials();
     if (!creds) {
-      process.stdout.write("Login: not logged in (run `xagent-plugin login`)\n");
+      process.stdout.write("Login: not logged in (run `xagt-plugin login`)\n");
     } else {
       const remaining = creds.accessExpire - Math.floor(Date.now() / 1000);
       const status = remaining > 0 ? `${Math.floor(remaining / 86400)}d remaining` : "expired";
@@ -176,9 +176,9 @@ export async function runCli(args: string[]): Promise<number> {
     process.stdout.write("  ✓ Registered for the hackathon\n\n");
     process.stdout.write("  Now go build your hackathon project.\n\n");
     process.stdout.write("  Helpful next commands:\n");
-    process.stdout.write("    xagent-plugin install --target all   # add OKX skills to your agents\n");
-    process.stdout.write("    xagent-plugin doctor                 # check session status\n");
-    process.stdout.write("    xagent-plugin submit                 # submit your project (when ready)\n\n");
+    process.stdout.write("    xagt-plugin install --target all   # add OKX skills to your agents\n");
+    process.stdout.write("    xagt-plugin doctor                 # check session status\n");
+    process.stdout.write("    xagt-plugin submit                 # submit your project (when ready)\n\n");
     return 0;
   }
 
@@ -206,7 +206,7 @@ export async function runCli(args: string[]): Promise<number> {
     process.stdout.write("  ✓ OKX skills installed in your agents\n\n");
     process.stdout.write("  Now go build your hackathon project.\n\n");
     process.stdout.write("  When you're ready to submit:\n");
-    process.stdout.write("    xagent-plugin submit\n\n");
+    process.stdout.write("    xagt-plugin submit\n\n");
     return 0;
   }
 
@@ -240,7 +240,7 @@ export async function runCli(args: string[]): Promise<number> {
     } catch (error) {
       if (error instanceof NotRegisteredError) {
         process.stdout.write("\n  ✗ You are not registered.\n");
-        process.stdout.write("  Run `xagent-plugin login` first to register, then submit.\n\n");
+        process.stdout.write("  Run `xagt-plugin login` first to register, then submit.\n\n");
         return 1;
       }
       throw error;
@@ -284,16 +284,16 @@ export async function runCli(args: string[]): Promise<number> {
 
 function writeHelp(): void {
   process.stdout.write(`Usage:
-  xagent-plugin setup [--target cursor|claude-code|generic|all] [--dry-run] [--no-browser] [--loopback] [--skip-substep]
+  xagt-plugin setup [--target cursor|claude-code|generic|all] [--dry-run] [--no-browser] [--loopback] [--skip-substep]
                               # one-shot: registers you + installs OKX skills
-  xagent-plugin submit [--name <s>] [--intro <s>] [--repo <url>] [--deploy <url>]
+  xagt-plugin submit [--name <s>] [--intro <s>] [--repo <url>] [--deploy <url>]
                               # generates README; you fork + PR to xerpa-ai/xagent-plugin
-  xagent-plugin login [--no-browser] [--loopback]   # re-login or switch accounts
-  xagent-plugin logout                  # clear local credentials
-  xagent-plugin install [--target ...]  # install skills only (no login)
-  xagent-plugin doctor                  # show login + runtime status
-  xagent-plugin report [--target ...]   # resend install report
-  xagent-plugin print-skill             # print SKILL.md to stdout
+  xagt-plugin login [--no-browser] [--loopback]   # re-login or switch accounts
+  xagt-plugin logout                  # clear local credentials
+  xagt-plugin install [--target ...]  # install skills only (no login)
+  xagt-plugin doctor                  # show login + runtime status
+  xagt-plugin report [--target ...]   # resend install report
+  xagt-plugin print-skill             # print SKILL.md to stdout
 
 Auth modes:
   default       paste-code flow (browser → page shows code → paste back)
@@ -301,9 +301,9 @@ Auth modes:
   --no-browser  device-code flow (for SSH / headless environments)
 
 Hackathon flow:
-  1. xagent-plugin setup --target all    # register + install
+  1. xagt-plugin setup --target all    # register + install
   2. build your project
-  3. xagent-plugin submit                # submit via GitHub PR
+  3. xagt-plugin submit                # submit via GitHub PR
 `);
 }
 
@@ -322,20 +322,20 @@ function readPackageVersion(): string {
 }
 
 export function resolveBaseUrl(): string {
-  if (process.env.XAGENT_API_BASE) {
-    return process.env.XAGENT_API_BASE;
+  if (process.env.XAGT_API_BASE) {
+    return process.env.XAGT_API_BASE;
   }
-  if (process.env.XAGENT_ENV === "prod") {
+  if (process.env.XAGT_ENV === "prod") {
     return "https://api.xerpaai.com";
   }
   return "https://testdapp.xerpaai.com";
 }
 
 export function resolveFrontendBase(): string {
-  if (process.env.XAGENT_FRONTEND_BASE) {
-    return process.env.XAGENT_FRONTEND_BASE;
+  if (process.env.XAGT_FRONTEND_BASE) {
+    return process.env.XAGT_FRONTEND_BASE;
   }
-  if (process.env.XAGENT_ENV === "prod") {
+  if (process.env.XAGT_ENV === "prod") {
     return "https://www.xerpaai.com";
   }
   return "https://testwww.xerpaai.com";

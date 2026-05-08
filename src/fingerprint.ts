@@ -15,7 +15,7 @@ export function collectFingerprint(input: {
   agentRuntime: string;
 }): FingerprintInfo {
   const machineIdHash = createHash("sha256")
-    .update(`${platform()}|${arch()}|${hostname()}|xagent-plugin-v1`)
+    .update(`${platform()}|${arch()}|${hostname()}|xagt-plugin-v1`)
     .digest("hex");
   return {
     machineIdHash,

@@ -38,7 +38,7 @@ export interface SubmitResult {
 
 export class NotRegisteredError extends Error {
   constructor() {
-    super("not registered — run `xagent-plugin login` first");
+    super("not registered — run `xagt-plugin login` first");
     this.name = "NotRegisteredError";
   }
 }
@@ -140,7 +140,7 @@ export function renderMarkdown(payload: SubmitPayload, cliVersion: string): stri
   return `# ${payload.name}
 
 **Participant ID:** \`${payload.participantId}\`
-**Submitted via:** \`xagent-plugin@${cliVersion}\`
+**Submitted via:** \`xagt-plugin@${cliVersion}\`
 **Submitted at:** ${submittedAt}
 
 ## Description

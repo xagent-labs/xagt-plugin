@@ -39,28 +39,28 @@ describe("parseArgs", () => {
 
 describe("resolveBaseUrl", () => {
   it("uses Xerpa test default and prod opt-in", () => {
-    const originalBase = process.env.XAGENT_API_BASE;
-    const originalEnv = process.env.XAGENT_ENV;
+    const originalBase = process.env.XAGT_API_BASE;
+    const originalEnv = process.env.XAGT_ENV;
 
-    delete process.env.XAGENT_API_BASE;
-    delete process.env.XAGENT_ENV;
+    delete process.env.XAGT_API_BASE;
+    delete process.env.XAGT_ENV;
     expect(resolveBaseUrl()).toBe("https://testdapp.xerpaai.com");
 
-    process.env.XAGENT_ENV = "prod";
+    process.env.XAGT_ENV = "prod";
     expect(resolveBaseUrl()).toBe("https://api.xerpaai.com");
 
-    process.env.XAGENT_API_BASE = "https://custom.example.com";
+    process.env.XAGT_API_BASE = "https://custom.example.com";
     expect(resolveBaseUrl()).toBe("https://custom.example.com");
 
     if (originalBase === undefined) {
-      delete process.env.XAGENT_API_BASE;
+      delete process.env.XAGT_API_BASE;
     } else {
-      process.env.XAGENT_API_BASE = originalBase;
+      process.env.XAGT_API_BASE = originalBase;
     }
     if (originalEnv === undefined) {
-      delete process.env.XAGENT_ENV;
+      delete process.env.XAGT_ENV;
     } else {
-      process.env.XAGENT_ENV = originalEnv;
+      process.env.XAGT_ENV = originalEnv;
     }
   });
 });

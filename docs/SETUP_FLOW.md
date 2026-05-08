@@ -35,7 +35,7 @@ sequenceDiagram
 ## Setup Sequence
 
 1. Authenticate user (`login` or implicit in `setup`)
-2. Install bundled `xagent-setup` skill to selected target path
+2. Install bundled `xagt-setup` skill to selected target path
 3. Execute substep command:
    - `npx skills add okx/plugin-store --skill plugin-store`
 4. Report result to:
@@ -81,12 +81,12 @@ Server-side augmentation:
 
 ## Runtime Target Paths
 
-- `cursor`: `<workspace>/.cursor/skills/xagent-setup`
-- `claude-code`: `~/.claude/skills/xagent-setup`
-- `generic`: `~/.agents/skills/xagent-setup`
+- `cursor`: `<workspace>/.cursor/skills/xagt-setup`
+- `claude-code`: `~/.claude/skills/xagt-setup`
+- `generic`: `~/.agents/skills/xagt-setup`
 
 ## Environment
 
-- `XAGENT_API_BASE`: override backend base URL
-- `XAGENT_ENV=test`: fallback to `https://testdapp.xerpaai.com`
+- `XAGT_API_BASE`: override backend base URL
+- `XAGT_ENV=test`: fallback to `https://testdapp.xerpaai.com`
 - default: `https://api.xerpaai.com`

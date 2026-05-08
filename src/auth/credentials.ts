@@ -12,13 +12,13 @@ export interface SavedCredentials {
 
 export function getConfigDir(): string {
   if (process.platform === "win32" && process.env.APPDATA) {
-    return join(process.env.APPDATA, "xagent");
+    return join(process.env.APPDATA, "xagt");
   }
   const xdg = process.env.XDG_CONFIG_HOME;
   if (xdg) {
-    return join(xdg, "xagent");
+    return join(xdg, "xagt");
   }
-  return join(homedir(), ".config", "xagent");
+  return join(homedir(), ".config", "xagt");
 }
 
 export function getCredentialPath(): string {

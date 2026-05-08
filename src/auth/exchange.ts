@@ -16,7 +16,7 @@ export async function initLoopbackAuth(input: {
   clientVersion: string;
 }): Promise<{ sessionId: string; state: string; loginUrl: string; expiresIn: number }> {
   return apiPost("/xagent/plugin/cli/auth/init", {
-    clientName: "xagent-plugin",
+    clientName: "xagt-plugin",
     clientVersion: input.clientVersion,
     redirectUri: input.redirectUri
   }, { baseUrl: input.baseUrl });
@@ -59,7 +59,7 @@ export async function initDeviceAuth(input: {
 }> {
   return apiPost(
     "/xagent/plugin/cli/auth/device",
-    { clientName: "xagent-plugin", clientVersion: input.clientVersion },
+    { clientName: "xagt-plugin", clientVersion: input.clientVersion },
     { baseUrl: input.baseUrl }
   );
 }
