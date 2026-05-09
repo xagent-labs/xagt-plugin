@@ -29,3 +29,6 @@ pnpm-debug.log*
 !.vscode/extensions.json
 !.vscode/settings.json
 .idea/
+
+# Claude Code per-developer settings (machine-local)
+.claude/settings.local.json
