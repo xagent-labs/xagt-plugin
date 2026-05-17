@@ -2,15 +2,15 @@
 
 **Participant ID:** `2055977153710788608`
 **Submitted via:** `xagt-plugin@0.4.0`
-**Submitted at:** 2026-05-17T13:41:24.132Z
+**Submitted at:** 2026-05-17T14:01:33.155Z
 
 ## Description
 
-Skill-based DeFi agent for yield scan, risk check, wallet analysis, swap and gas optimization with DeFiLlama/CoinGecko APIs.
+Skill-based DeFi agent: yield scan, risk check, wallet analysis, swap and gas optimization (DeFiLlama/CoinGecko).
 
 ## Repo
 
-https://github.com/YOUR_USERNAME/defihunter-ai
+https://github.com/dimeng666/defihunter-ai
 
 ## Deployed URL
 
