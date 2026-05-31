@@ -1,0 +1,33 @@
+@import "tailwindcss";
+
+@theme {
+  --color-ink:        #000000;
+  --color-paper:      #f6f3f1;
+  --color-off-black:  #242424;
+  --color-pale-stone: #4e4d4d;
+  --color-faint:      #797776;
+  --color-atmo:       #cfdaf5;
+  --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
+  --font-serif: 'Noto Serif', ui-serif, serif;
+  --font-sans: 'Inter', ui-sans-serif, sans-serif;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+
+body {
+  background: #f6f3f1;
+  color: #000000;
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  -webkit-font-smoothing: antialiased;
+}
+
+.reveal { opacity: 0; transform: translateY(24px); transition: opacity 0.6s ease, transform 0.6s ease; }
+.reveal.visible { opacity: 1; transform: translateY(0); }
+.reveal-delay-1 { transition-delay: 0.1s; }
+.reveal-delay-2 { transition-delay: 0.2s; }
+.reveal-delay-3 { transition-delay: 0.3s; }
+
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: #f6f3f1; }
+::-webkit-scrollbar-thumb { background: #cfdaf5; border-radius: 99px; }

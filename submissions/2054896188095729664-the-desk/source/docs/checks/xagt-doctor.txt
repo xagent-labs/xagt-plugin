@@ -1,0 +1,10 @@
+
+> the-desk@0.1.0 xagt:doctor
+> npx @xagt/agent-plugin@latest doctor
+
+Node: 22.5.1
+npm: 10.8.2
+HOME: /Users/leonliu
+Backend: https://api.xerpaai.com
+Frontend: https://www.xerpaai.com
+Login: 2054896188095729664 (727d remaining)

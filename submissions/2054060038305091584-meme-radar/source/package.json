@@ -1,0 +1,28 @@
+{
+  "name": "meme-radar",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "tsc --noEmit && vite build",
+    "app": "npm run build && node scripts/radar-server.mjs",
+    "preview": "vite preview --host 0.0.0.0",
+    "okx:snapshot": "node scripts/collect-okx-snapshot.mjs",
+    "submit:check": "node scripts/check-submission.mjs",
+    "submit:xagt": "npm run submit:check && node scripts/submit-xagt.mjs",
+    "submit": "npm run submit:xagt"
+  },
+  "dependencies": {
+    "lucide-react": "^0.561.0",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^5.1.1",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "typescript": "^5.9.3",
+    "vite": "^7.2.7"
+  }
+}

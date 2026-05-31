@@ -1,0 +1,9 @@
+{
+  "deskName": "The Desk",
+  "aggression": "conservative",
+  "defaultChain": "X Layer",
+  "maxPositionPct": 5,
+  "realFundsCapUsd": 50,
+  "executionMode": "fixture",
+  "reporterDigestPath": "digest/latest.md"
+}

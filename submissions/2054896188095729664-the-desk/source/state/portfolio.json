@@ -1,0 +1,16 @@
+{
+  "wallet": "demo.okx.agentic.wallet",
+  "lastRefreshTime": null,
+  "bookValueUsd": 2500,
+  "holdings": [
+    {
+      "asset": "USDC",
+      "chain": "X Layer",
+      "valueUsd": 2500
+    }
+  ],
+  "targetAllocation": {
+    "maxSinglePositionPct": 5,
+    "idleCashMinPct": 30
+  }
+}

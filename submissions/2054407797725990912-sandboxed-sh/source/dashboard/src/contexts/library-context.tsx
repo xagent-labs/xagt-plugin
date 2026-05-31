@@ -1,0 +1,431 @@
+'use client';
+
+import {
+  createContext,
+  useContext,
+  useCallback,
+  useState,
+  useEffect,
+  useMemo,
+  type ReactNode,
+} from 'react';
+import { useToast } from '@/components/toast';
+import {
+  getLibraryStatus,
+  getLibraryMcps,
+  listLibrarySkills,
+  listLibraryCommands,
+  syncLibrary,
+  forceSyncLibrary,
+  forcePushLibrary,
+  commitLibrary,
+  pushLibrary,
+  saveLibraryMcps,
+  saveLibrarySkill,
+  deleteLibrarySkill,
+  saveLibraryCommand,
+  deleteLibraryCommand,
+  listLibraryAgents,
+  getLibraryAgent as apiGetLibraryAgent,
+  saveLibraryAgent as apiSaveLibraryAgent,
+  deleteLibraryAgent,
+  LibraryUnavailableError,
+  DivergedHistoryError,
+  type LibraryStatus,
+  type McpServerDef,
+  type SkillSummary,
+  type CommandSummary,
+  type LibraryAgentSummary,
+  type LibraryAgent,
+} from '@/lib/api';
+
+// Re-export types for consumers
+export type { LibraryAgentSummary };
+
+interface LibraryContextValue {
+  // State
+  status: LibraryStatus | null;
+  mcps: Record<string, McpServerDef>;
+  skills: SkillSummary[];
+  commands: CommandSummary[];
+  libraryAgents: LibraryAgentSummary[];
+  loading: boolean;
+  libraryUnavailable: boolean;
+  libraryUnavailableMessage: string | null;
+  /** Set when sync fails due to diverged history (e.g., after force push on remote) */
+  divergedHistory: boolean;
+  divergedHistoryMessage: string | null;
+
+  // Actions
+  refresh: () => Promise<void>;
+  refreshStatus: () => Promise<void>;
+  sync: () => Promise<void>;
+  /** Force reset local to match remote (use after diverged history) */
+  forceSync: () => Promise<void>;
+  /** Force push local to remote (use when you want to keep local changes) */
+  forcePush: () => Promise<void>;
+  commit: (message: string) => Promise<void>;
+  push: () => Promise<void>;
+
+  // MCP operations
+  saveMcps: (mcps: Record<string, McpServerDef>) => Promise<void>;
+
+  // Skill operations
+  saveSkill: (name: string, content: string) => Promise<void>;
+  removeSkill: (name: string) => Promise<void>;
+
+  // Command operations
+  saveCommand: (name: string, content: string) => Promise<void>;
+  removeCommand: (name: string) => Promise<void>;
+
+  // Library Agent operations
+  getLibraryAgent: (name: string) => Promise<LibraryAgent>;
+  saveLibraryAgent: (name: string, content: string) => Promise<void>;
+  removeLibraryAgent: (name: string) => Promise<void>;
+  refreshLibraryAgents: () => Promise<void>;
+
+  // Operation states
+  syncing: boolean;
+  committing: boolean;
+  pushing: boolean;
+}
+
+const LibraryContext = createContext<LibraryContextValue | null>(null);
+
+export function useLibrary() {
+  const ctx = useContext(LibraryContext);
+  if (!ctx) {
+    throw new Error('useLibrary must be used within a LibraryProvider');
+  }
+  return ctx;
+}
+
+interface LibraryProviderProps {
+  children: ReactNode;
+}
+
+export function LibraryProvider({ children }: LibraryProviderProps) {
+  const { showError } = useToast();
+  const [status, setStatus] = useState<LibraryStatus | null>(null);
+  const [mcps, setMcps] = useState<Record<string, McpServerDef>>({});
+  const [skills, setSkills] = useState<SkillSummary[]>([]);
+  const [commands, setCommands] = useState<CommandSummary[]>([]);
+  const [libraryAgents, setLibraryAgents] = useState<LibraryAgentSummary[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [libraryUnavailable, setLibraryUnavailable] = useState(false);
+  const [libraryUnavailableMessage, setLibraryUnavailableMessage] = useState<string | null>(null);
+
+  const [syncing, setSyncing] = useState(false);
+  const [committing, setCommitting] = useState(false);
+  const [pushing, setPushing] = useState(false);
+  const [divergedHistory, setDivergedHistory] = useState(false);
+  const [divergedHistoryMessage, setDivergedHistoryMessage] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    setLibraryUnavailable(false);
+    setLibraryUnavailableMessage(null);
+
+    const results = await Promise.allSettled([
+      getLibraryStatus(),
+      getLibraryMcps(),
+      listLibrarySkills(),
+      listLibraryCommands(),
+      listLibraryAgents().catch(() => []),
+    ]);
+
+    const errors: string[] = [];
+    const handleRejection = (label: string, reason: unknown) => {
+      if (reason instanceof LibraryUnavailableError) {
+        setLibraryUnavailable(true);
+        setLibraryUnavailableMessage(reason.message);
+        setStatus(null);
+        setMcps({});
+        setSkills([]);
+        setCommands([]);
+        setLibraryAgents([]);
+        return true;
+      }
+      errors.push(`${label}: ${reason instanceof Error ? reason.message : 'Failed to load'}`);
+      return false;
+    };
+
+    const [statusRes, mcpsRes, skillsRes, commandsRes, agentsRes] = results;
+
+    if (statusRes.status === 'fulfilled') {
+      setStatus(statusRes.value);
+    } else if (handleRejection('Status', statusRes.reason)) {
+      setLoading(false);
+      return;
+    }
+
+    if (mcpsRes.status === 'fulfilled') {
+      setMcps(mcpsRes.value);
+    } else if (handleRejection('MCPs', mcpsRes.reason)) {
+      setLoading(false);
+      return;
+    }
+
+    if (skillsRes.status === 'fulfilled') {
+      setSkills(skillsRes.value);
+    } else if (handleRejection('Skills', skillsRes.reason)) {
+      setLoading(false);
+      return;
+    }
+
+    if (commandsRes.status === 'fulfilled') {
+      setCommands(commandsRes.value);
+    } else if (handleRejection('Commands', commandsRes.reason)) {
+      setLoading(false);
+      return;
+    }
+
+    if (agentsRes.status === 'fulfilled') {
+      setLibraryAgents(agentsRes.value);
+    } else if (handleRejection('Agents', agentsRes.reason)) {
+      setLoading(false);
+      return;
+    }
+
+    if (errors.length > 0) {
+      showError(errors[0]);
+    }
+
+    setLoading(false);
+  }, [showError]);
+
+  const refreshStatus = useCallback(async () => {
+    try {
+      const statusData = await getLibraryStatus();
+      setStatus(statusData);
+    } catch (err) {
+      // Silently fail status refresh - it's not critical
+      console.error('Failed to refresh status:', err);
+    }
+  }, []);
+
+  // Initial load
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  const sync = useCallback(async () => {
+    try {
+      setSyncing(true);
+      setDivergedHistory(false);
+      setDivergedHistoryMessage(null);
+      await syncLibrary();
+      await refresh();
+    } catch (err) {
+      if (err instanceof DivergedHistoryError) {
+        // Set diverged history state so UI can show force sync options
+        setDivergedHistory(true);
+        setDivergedHistoryMessage(err.message);
+        // Don't show generic error toast - UI will show specific options
+        throw err;
+      }
+      showError(err instanceof Error ? err.message : 'Failed to sync');
+      throw err;
+    } finally {
+      setSyncing(false);
+    }
+  }, [refresh, showError]);
+
+  const forceSync = useCallback(async () => {
+    try {
+      setSyncing(true);
+      await forceSyncLibrary();
+      setDivergedHistory(false);
+      setDivergedHistoryMessage(null);
+      await refresh();
+    } catch (err) {
+      showError(err instanceof Error ? err.message : 'Failed to force sync');
+      throw err;
+    } finally {
+      setSyncing(false);
+    }
+  }, [refresh, showError]);
+
+  const forcePush = useCallback(async () => {
+    try {
+      setPushing(true);
+      await forcePushLibrary();
+      setDivergedHistory(false);
+      setDivergedHistoryMessage(null);
+      await refreshStatus();
+    } catch (err) {
+      showError(err instanceof Error ? err.message : 'Failed to force push');
+      throw err;
+    } finally {
+      setPushing(false);
+    }
+  }, [refreshStatus, showError]);
+
+  const commit = useCallback(async (message: string) => {
+    try {
+      setCommitting(true);
+      await commitLibrary(message);
+      await refreshStatus();
+    } catch (err) {
+      showError(err instanceof Error ? err.message : 'Failed to commit');
+      throw err;
+    } finally {
+      setCommitting(false);
+    }
+  }, [refreshStatus, showError]);
+
+  const push = useCallback(async () => {
+    try {
+      setPushing(true);
+      await pushLibrary();
+      await refreshStatus();
+    } catch (err) {
+      showError(err instanceof Error ? err.message : 'Failed to push');
+      throw err;
+    } finally {
+      setPushing(false);
+    }
+  }, [refreshStatus, showError]);
+
+  const saveMcps = useCallback(async (newMcps: Record<string, McpServerDef>) => {
+    await saveLibraryMcps(newMcps);
+    setMcps(newMcps);
+    await refreshStatus();
+  }, [refreshStatus]);
+
+  const saveSkill = useCallback(async (name: string, content: string) => {
+    await saveLibrarySkill(name, content);
+    // Refresh skills list
+    const skillsData = await listLibrarySkills();
+    setSkills(skillsData);
+    await refreshStatus();
+  }, [refreshStatus]);
+
+  const removeSkill = useCallback(async (name: string) => {
+    await deleteLibrarySkill(name);
+    setSkills((prev) => prev.filter((s) => s.name !== name));
+    await refreshStatus();
+  }, [refreshStatus]);
+
+  const saveCommand = useCallback(async (name: string, content: string) => {
+    await saveLibraryCommand(name, content);
+    // Refresh commands list
+    const commandsData = await listLibraryCommands();
+    setCommands(commandsData);
+    await refreshStatus();
+  }, [refreshStatus]);
+
+  const removeCommand = useCallback(async (name: string) => {
+    await deleteLibraryCommand(name);
+    setCommands((prev) => prev.filter((c) => c.name !== name));
+    await refreshStatus();
+  }, [refreshStatus]);
+
+  // Library Agent operations
+  const getLibraryAgent = useCallback(async (name: string): Promise<LibraryAgent> => {
+    return apiGetLibraryAgent(name);
+  }, []);
+
+  const saveLibraryAgentFn = useCallback(async (name: string, content: string) => {
+    // Build a partial LibraryAgent object from content - server handles parsing
+    const agent: LibraryAgent = {
+      name,
+      content,
+      description: null,
+      path: `agent/${name}.md`,
+      model: null,
+      tools: {},
+      permissions: {},
+    };
+    await apiSaveLibraryAgent(name, agent);
+    const agentsData = await listLibraryAgents();
+    setLibraryAgents(agentsData);
+    await refreshStatus();
+  }, [refreshStatus]);
+
+  const removeLibraryAgent = useCallback(async (name: string) => {
+    await deleteLibraryAgent(name);
+    setLibraryAgents((prev) => prev.filter((a) => a.name !== name));
+    await refreshStatus();
+  }, [refreshStatus]);
+
+  const refreshLibraryAgents = useCallback(async () => {
+    try {
+      const agentsData = await listLibraryAgents();
+      setLibraryAgents(agentsData);
+    } catch {
+      // Silently fail
+    }
+  }, []);
+
+  const value = useMemo<LibraryContextValue>(
+    () => ({
+      status,
+      mcps,
+      skills,
+      commands,
+      libraryAgents,
+      loading,
+      libraryUnavailable,
+      libraryUnavailableMessage,
+      divergedHistory,
+      divergedHistoryMessage,
+      refresh,
+      refreshStatus,
+      sync,
+      forceSync,
+      forcePush,
+      commit,
+      push,
+      saveMcps,
+      saveSkill,
+      removeSkill,
+      saveCommand,
+      removeCommand,
+      getLibraryAgent,
+      saveLibraryAgent: saveLibraryAgentFn,
+      removeLibraryAgent,
+      refreshLibraryAgents,
+      syncing,
+      committing,
+      pushing,
+    }),
+    [
+      status,
+      mcps,
+      skills,
+      commands,
+      libraryAgents,
+      loading,
+      libraryUnavailable,
+      libraryUnavailableMessage,
+      divergedHistory,
+      divergedHistoryMessage,
+      refresh,
+      refreshStatus,
+      sync,
+      forceSync,
+      forcePush,
+      commit,
+      push,
+      saveMcps,
+      saveSkill,
+      removeSkill,
+      saveCommand,
+      removeCommand,
+      getLibraryAgent,
+      saveLibraryAgentFn,
+      removeLibraryAgent,
+      refreshLibraryAgents,
+      syncing,
+      committing,
+      pushing,
+    ]
+  );
+
+  return (
+    <LibraryContext.Provider value={value}>
+      {children}
+    </LibraryContext.Provider>
+  );
+}

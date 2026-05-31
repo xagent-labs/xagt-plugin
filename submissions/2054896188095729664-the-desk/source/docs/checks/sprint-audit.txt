@@ -1,0 +1,30 @@
+
+> the-desk@0.1.0 sprint:audit
+> node scripts/audit-sprint.mjs
+
+PASS M1 scanner and verifier import shared policy module
+  src/opportunity-scanner.ts and src/blackbox-core.ts import ./policy/index.js
+PASS M1 black-box spec exists and maps named incidents
+  docs/black-box-spec.md includes Freysa, AIXBT, BasisOS, Banana Gun, and ElizaOS
+PASS M2 browser writes events through POST /api/events
+  scripts/dev-app.mjs exposes /api/events and web/src/main.tsx posts event drafts
+PASS M3 adversarial verifier tests cover veto-finality, execution ordering, and malformed payloads
+  tests/blackbox.test.ts contains the required adversarial cases
+PASS M4 Black Box modal has timeline tamper and restore UX
+  web/src/main.tsx has BlackBoxTimeline and scripts/dev-app.mjs has tamper/restore endpoints
+PASS M5 scanner-policy parity and OKX skill events are covered
+  property test has 1000 cases; canonical executions have risk.security_check and quote.simulation before execution
+PASS M6 policy console override and failure UI are implemented
+  policy modal, safety banner, failure banner, takeover modal, and policy.updated support exist
+PASS M7 SessionAnchor contract and chain.commitment event exist
+  contracts/SessionAnchor.sol exists and current trace contains chain.commitment
+FAIL M7 hard gate: chain.commitment has real X Layer tx hash and explorer link
+  status=not-configured txHash=missing explorerUrl=missing contract=missing sessionHashBytes32=0xdb6487af170ce81dba57bb2bbb2a6f5dc224dca5d3bc20ad2afce240805f3010 manifestTxMatches=false manifestContractMatches=false explorerLive=not-run anchorRpc=not-run
+PASS M8 radar-first demo script and make demo entrypoint exist
+  demo/screenplay.md starts on Opportunity Radar and Makefile demo target runs npm run app
+FAIL M8 hard gate: demo recording artifact exists
+  demo/recording.mp4 missing; demoVideoUrl=missing validVideoUrl=false videoLive=not-run
+FAIL M8 hard gate: submission external artifacts are recorded
+  manifest fields complete=false; cold viewers=1; correct=0; contractMatchesTrace=false; txMatchesTrace=false; explorerMatchesTrace=false; repoLive=not-run; backupLive=not-run
+
+SPRINT AUDIT: BLOCKED (3 failing checks)

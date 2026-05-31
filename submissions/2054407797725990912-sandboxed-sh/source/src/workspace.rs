@@ -1,0 +1,4714 @@
+//! Workspace management for OpenCode sessions.
+//!
+//! sandboxed.sh acts as a workspace host for OpenCode. This module prepares
+//! per-workspace directories (shared across missions) and writes `opencode.json`
+//! with the currently configured MCP servers.
+//!
+//! ## Workspace Types
+//!
+//! - **Host**: Execute directly on the remote host environment
+//! - **Container**: Execute inside an isolated container environment (systemd-nspawn)
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use tokio::sync::RwLock;
+use tracing::warn;
+use uuid::Uuid;
+
+use crate::ai_providers::{AIProvider, ProviderType};
+use crate::config::Config;
+use crate::library::env_crypto::strip_encrypted_tags;
+use crate::library::LibraryStore;
+use crate::mcp::{McpRegistry, McpScope, McpServerConfig, McpTransport};
+use crate::nspawn::{self, NspawnDistro};
+use crate::tools::terminal::{rtk_binary_path, rtk_enabled};
+use crate::util::{env_var_bool, home_dir, strip_jsonc_comments, AI_PROVIDERS_PATH};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Workspace Types
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The nil UUID represents the default "host" workspace.
+pub const DEFAULT_WORKSPACE_ID: Uuid = Uuid::nil();
+
+/// Type of workspace execution environment.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceType {
+    /// Execute directly on remote host
+    #[default]
+    Host,
+    /// Execute inside isolated container environment
+    #[serde(alias = "chroot")]
+    Container,
+}
+
+impl WorkspaceType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Host => "host",
+            Self::Container => "container",
+        }
+    }
+}
+
+pub fn is_container_fallback(workspace: &Workspace) -> bool {
+    workspace
+        .config
+        .get("container_fallback")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+pub fn use_nspawn_for_workspace(workspace: &Workspace) -> bool {
+    if workspace.workspace_type != WorkspaceType::Container {
+        return false;
+    }
+    if is_container_fallback(workspace) {
+        return false;
+    }
+    nspawn::nspawn_available()
+}
+
+/// Status of a workspace.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceStatus {
+    /// Container not yet built
+    Pending,
+    /// Container build in progress
+    Building,
+    /// Ready for execution
+    #[default]
+    Ready,
+    /// Build failed
+    Error,
+}
+
+/// Tailscale networking mode for containers with isolated networking.
+/// Only relevant when `shared_network` is false.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TailscaleMode {
+    /// Route all traffic through Tailscale exit node (requires TS_EXIT_NODE).
+    /// Container has no direct internet access; all traffic goes via the exit node.
+    #[default]
+    ExitNode,
+    /// Connect to tailnet for device access, but use host gateway for internet.
+    /// Container can reach tailnet devices AND has regular internet access.
+    TailnetOnly,
+}
+
+impl TailscaleMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ExitNode => "exit_node",
+            Self::TailnetOnly => "tailnet_only",
+        }
+    }
+}
+
+/// Serde default helper: returns `true`.
+pub fn default_true() -> bool {
+    true
+}
+
+/// A workspace definition.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Workspace {
+    /// Unique identifier
+    pub id: Uuid,
+    /// Human-readable name
+    pub name: String,
+    /// Type of workspace (Host or Container)
+    pub workspace_type: WorkspaceType,
+    /// Working directory within the workspace
+    pub path: PathBuf,
+    /// Current status
+    pub status: WorkspaceStatus,
+    /// Error message if status is Error
+    pub error_message: Option<String>,
+    /// Additional configuration
+    #[serde(default)]
+    pub config: serde_json::Value,
+    /// Workspace template name (if created from a template)
+    #[serde(default)]
+    pub template: Option<String>,
+    /// Preferred Linux distribution for container workspaces
+    #[serde(default)]
+    pub distro: Option<String>,
+    /// Environment variables always loaded for this workspace
+    #[serde(default)]
+    pub env_vars: HashMap<String, String>,
+    /// Init script fragment names to include (executed in order)
+    #[serde(default)]
+    pub init_scripts: Vec<String>,
+    /// Custom init script to run when the workspace is built/rebuilt (after fragments)
+    #[serde(default)]
+    pub init_script: Option<String>,
+    /// Creation timestamp
+    pub created_at: DateTime<Utc>,
+    /// Skill names from library to sync to this workspace
+    #[serde(default)]
+    pub skills: Vec<String>,
+    /// Plugin identifiers for hooks
+    #[serde(default)]
+    pub plugins: Vec<String>,
+    /// Whether to share the host network (default: true).
+    /// When true, bind-mounts /etc/resolv.conf for DNS.
+    /// Set to false for isolated networking (e.g., Tailscale).
+    #[serde(default)]
+    pub shared_network: Option<bool>,
+    /// Tailscale networking mode when shared_network is false.
+    /// - `exit_node`: Route all traffic through Tailscale exit node
+    /// - `tailnet_only`: Connect to tailnet but use host gateway for internet
+    #[serde(default)]
+    pub tailscale_mode: Option<TailscaleMode>,
+    /// MCP server names to enable for this workspace.
+    ///
+    /// - Empty + any `mcps_replace_defaults` → all MCPs with `default_enabled = true`
+    /// - Non-empty + `mcps_replace_defaults = true`  → **only** the listed MCPs
+    /// - Non-empty + `mcps_replace_defaults = false` → listed MCPs **plus** all `default_enabled` MCPs
+    #[serde(default)]
+    pub mcps: Vec<String>,
+    /// Controls whether a non-empty `mcps` list fully replaces default MCPs.
+    ///
+    /// - `true` (default): the `mcps` list is the complete set — default MCPs are excluded
+    ///   unless explicitly listed. This is the original behavior.
+    /// - `false`: the `mcps` list is additive — default MCPs stay active alongside custom ones.
+    ///
+    /// Has no effect when `mcps` is empty (defaults are always used in that case).
+    #[serde(default = "default_true")]
+    pub mcps_replace_defaults: bool,
+    /// Config profile to use for this workspace (from workspace template).
+    /// Defaults to "default" if not specified.
+    #[serde(default)]
+    pub config_profile: Option<String>,
+}
+
+impl Workspace {
+    /// Create the default host workspace.
+    pub fn default_host(working_dir: PathBuf) -> Self {
+        Self {
+            id: DEFAULT_WORKSPACE_ID,
+            name: "host".to_string(),
+            workspace_type: WorkspaceType::Host,
+            path: working_dir,
+            status: WorkspaceStatus::Ready,
+            error_message: None,
+            config: serde_json::json!({}),
+            template: None,
+            distro: None,
+            env_vars: HashMap::new(),
+            init_scripts: Vec::new(),
+            init_script: None,
+            created_at: Utc::now(),
+            skills: Vec::new(),
+            plugins: Vec::new(),
+            shared_network: None,
+            tailscale_mode: None,
+            mcps: Vec::new(),
+            mcps_replace_defaults: true,
+            config_profile: None,
+        }
+    }
+
+    /// Create a new container workspace (pending build).
+    pub fn new_container(name: String, path: PathBuf) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            name,
+            workspace_type: WorkspaceType::Container,
+            path,
+            status: WorkspaceStatus::Pending,
+            error_message: None,
+            config: serde_json::json!({}),
+            template: None,
+            distro: None,
+            env_vars: HashMap::new(),
+            init_scripts: Vec::new(),
+            init_script: None,
+            created_at: Utc::now(),
+            skills: Vec::new(),
+            config_profile: None,
+            plugins: Vec::new(),
+            shared_network: None,
+            tailscale_mode: None,
+            mcps: Vec::new(),
+            mcps_replace_defaults: true,
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Workspace Store
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Persistent store for workspaces with JSON file backing.
+pub struct WorkspaceStore {
+    workspaces: RwLock<HashMap<Uuid, Workspace>>,
+    storage_path: PathBuf,
+    working_dir: PathBuf,
+}
+
+impl WorkspaceStore {
+    /// Create a new workspace store, loading existing data from disk.
+    ///
+    /// This also scans for orphaned container directories and restores them.
+    pub async fn new(working_dir: PathBuf) -> Self {
+        let storage_path = working_dir.join(".sandboxed-sh/workspaces.json");
+
+        let store = Self {
+            workspaces: RwLock::new(HashMap::new()),
+            storage_path,
+            working_dir: working_dir.clone(),
+        };
+
+        // Load existing workspaces from disk
+        let mut workspaces = match store.load_from_disk() {
+            Ok(loaded) => loaded,
+            Err(e) => {
+                tracing::warn!("Failed to load workspaces from disk: {}", e);
+                HashMap::new()
+            }
+        };
+
+        // Ensure default host workspace exists
+        if !workspaces.contains_key(&DEFAULT_WORKSPACE_ID) {
+            let host = Workspace::default_host(working_dir.clone());
+            workspaces.insert(host.id, host);
+        }
+        if let Some(host) = workspaces.get_mut(&DEFAULT_WORKSPACE_ID) {
+            if !host.skills.is_empty() {
+                host.skills.clear();
+                tracing::info!(
+                    workspace = %host.name,
+                    "Cleared default host workspace skills list to allow all library skills"
+                );
+            }
+        }
+
+        // Scan for orphaned containers and restore them
+        let orphaned = store.scan_orphaned_containers(&workspaces).await;
+        for workspace in orphaned {
+            tracing::info!(
+                "Restored orphaned container workspace: {} at {}",
+                workspace.name,
+                workspace.path.display()
+            );
+            workspaces.insert(workspace.id, workspace);
+        }
+
+        // Store workspaces
+        {
+            let mut guard = store.workspaces.write().await;
+            *guard = workspaces;
+        }
+
+        // Save to disk to persist any recovered workspaces
+        if let Err(e) = store.save_to_disk().await {
+            tracing::error!("Failed to save workspaces to disk: {}", e);
+        }
+
+        store
+    }
+
+    /// Load workspaces from disk.
+    fn load_from_disk(&self) -> Result<HashMap<Uuid, Workspace>, std::io::Error> {
+        if !self.storage_path.exists() {
+            return Ok(HashMap::new());
+        }
+
+        let contents = std::fs::read_to_string(&self.storage_path)?;
+        let workspaces: Vec<Workspace> = serde_json::from_str(&contents)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+        Ok(workspaces.into_iter().map(|w| (w.id, w)).collect())
+    }
+
+    /// Save workspaces to disk.
+    async fn save_to_disk(&self) -> Result<(), std::io::Error> {
+        let workspaces = self.workspaces.read().await;
+        let workspaces_vec: Vec<&Workspace> = workspaces.values().collect();
+
+        // Ensure parent directory exists
+        if let Some(parent) = self.storage_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let contents = serde_json::to_string_pretty(&workspaces_vec)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+        std::fs::write(&self.storage_path, contents)?;
+        Ok(())
+    }
+
+    /// Scan for container directories that exist on disk but aren't in the store.
+    async fn scan_orphaned_containers(&self, known: &HashMap<Uuid, Workspace>) -> Vec<Workspace> {
+        let containers_dir = self.working_dir.join(".sandboxed-sh/containers");
+
+        if !containers_dir.exists() {
+            return Vec::new();
+        }
+
+        // Get all known container paths
+        let known_paths: std::collections::HashSet<PathBuf> = known
+            .values()
+            .filter(|w| w.workspace_type == WorkspaceType::Container)
+            .map(|w| w.path.clone())
+            .collect();
+
+        let mut orphaned = Vec::new();
+
+        for root in [containers_dir] {
+            if !root.exists() {
+                continue;
+            }
+
+            let entries = match std::fs::read_dir(&root) {
+                Ok(entries) => entries,
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to read containers directory {}: {}",
+                        root.display(),
+                        e
+                    );
+                    continue;
+                }
+            };
+
+            for entry in entries.flatten() {
+                let path = entry.path();
+
+                // Skip non-directories
+                if !path.is_dir() {
+                    continue;
+                }
+
+                // Check if this path is known
+                if known_paths.contains(&path) {
+                    continue;
+                }
+
+                // Get the directory name as workspace name
+                let name = match path.file_name().and_then(|n| n.to_str()) {
+                    Some(n) => n.to_string(),
+                    None => continue,
+                };
+
+                // Check if it looks like a valid container (has basic structure)
+                let is_valid_container = path.join("etc").exists() || path.join("bin").exists();
+
+                // Determine status based on filesystem state
+                let status = if is_valid_container {
+                    WorkspaceStatus::Ready
+                } else {
+                    // Incomplete container - might have been interrupted
+                    WorkspaceStatus::Pending
+                };
+
+                let workspace = Workspace {
+                    id: Uuid::new_v4(),
+                    name,
+                    workspace_type: WorkspaceType::Container,
+                    path,
+                    status,
+                    error_message: None,
+                    config: serde_json::json!({}),
+                    template: None,
+                    distro: None,
+                    env_vars: HashMap::new(),
+                    init_scripts: Vec::new(),
+                    init_script: None,
+                    created_at: Utc::now(), // We don't know the actual creation time
+                    skills: Vec::new(),
+                    plugins: Vec::new(),
+                    shared_network: None, // Default to shared network
+                    tailscale_mode: None,
+                    mcps: Vec::new(),
+                    mcps_replace_defaults: true,
+                    config_profile: None,
+                };
+
+                orphaned.push(workspace);
+            }
+        }
+
+        orphaned
+    }
+
+    /// List all workspaces.
+    pub async fn list(&self) -> Vec<Workspace> {
+        let guard = self.workspaces.read().await;
+        let mut list: Vec<_> = guard.values().cloned().collect();
+        list.sort_by(|a, b| a.name.cmp(&b.name));
+        list
+    }
+
+    /// Get a workspace by ID.
+    pub async fn get(&self, id: Uuid) -> Option<Workspace> {
+        let guard = self.workspaces.read().await;
+        guard.get(&id).cloned()
+    }
+
+    /// Get the default host workspace.
+    pub async fn get_default(&self) -> Workspace {
+        self.get(DEFAULT_WORKSPACE_ID)
+            .await
+            .expect("Default workspace should always exist")
+    }
+
+    /// Add a new workspace.
+    pub async fn add(&self, workspace: Workspace) -> Uuid {
+        let id = workspace.id;
+        {
+            let mut guard = self.workspaces.write().await;
+            guard.insert(id, workspace);
+        }
+
+        if let Err(e) = self.save_to_disk().await {
+            tracing::error!("Failed to save workspaces to disk: {}", e);
+        }
+
+        id
+    }
+
+    /// Update a workspace.
+    pub async fn update(&self, workspace: Workspace) -> bool {
+        let updated = {
+            let mut guard = self.workspaces.write().await;
+            if let std::collections::hash_map::Entry::Occupied(mut entry) =
+                guard.entry(workspace.id)
+            {
+                entry.insert(workspace);
+                true
+            } else {
+                false
+            }
+        };
+
+        if updated {
+            if let Err(e) = self.save_to_disk().await {
+                tracing::error!("Failed to save workspaces to disk: {}", e);
+            }
+        }
+
+        updated
+    }
+
+    /// Delete a workspace (cannot delete the default host workspace).
+    pub async fn delete(&self, id: Uuid) -> bool {
+        if id == DEFAULT_WORKSPACE_ID {
+            return false; // Cannot delete default workspace
+        }
+
+        let existed = {
+            let mut guard = self.workspaces.write().await;
+            guard.remove(&id).is_some()
+        };
+
+        if existed {
+            if let Err(e) = self.save_to_disk().await {
+                tracing::error!("Failed to save workspaces to disk: {}", e);
+            }
+        }
+
+        existed
+    }
+}
+
+/// Shared workspace store type.
+pub type SharedWorkspaceStore = Arc<WorkspaceStore>;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Original Workspace Utilities
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn sanitize_key(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+        .collect::<String>()
+        .to_lowercase()
+        .replace('-', "_")
+}
+
+fn unique_key(base: &str, used: &mut std::collections::HashSet<String>) -> String {
+    if !used.contains(base) {
+        used.insert(base.to_string());
+        return base.to_string();
+    }
+    let mut i = 2;
+    loop {
+        let candidate = format!("{}_{}", base, i);
+        if !used.contains(&candidate) {
+            used.insert(candidate.clone());
+            return candidate;
+        }
+        i += 1;
+    }
+}
+
+/// Root directory for sandboxed.sh config data (versioned with repo).
+pub fn config_root(working_dir: &Path) -> PathBuf {
+    working_dir.join(".sandboxed-sh")
+}
+
+/// Root directory for workspace folders.
+pub fn workspaces_root(working_dir: &Path) -> PathBuf {
+    working_dir.join("workspaces")
+}
+
+/// Root directory for workspace folders under a specific workspace path.
+pub fn workspaces_root_for(root: &Path) -> PathBuf {
+    root.join("workspaces")
+}
+
+/// Workspace directory for a mission.
+pub fn mission_workspace_dir(working_dir: &Path, mission_id: Uuid) -> PathBuf {
+    mission_workspace_dir_for_root(working_dir, mission_id)
+}
+
+/// Workspace directory for a task.
+pub fn task_workspace_dir(working_dir: &Path, task_id: Uuid) -> PathBuf {
+    task_workspace_dir_for_root(working_dir, task_id)
+}
+
+/// Workspace directory for a mission under a specific workspace root.
+pub fn mission_workspace_dir_for_root(root: &Path, mission_id: Uuid) -> PathBuf {
+    let short_id = &mission_id.to_string()[..8];
+    workspaces_root_for(root).join(format!("mission-{}", short_id))
+}
+
+/// Workspace directory for a task under a specific workspace root.
+pub fn task_workspace_dir_for_root(root: &Path, task_id: Uuid) -> PathBuf {
+    let short_id = &task_id.to_string()[..8];
+    workspaces_root_for(root).join(format!("task-{}", short_id))
+}
+
+fn opencode_entry_from_mcp(
+    config: &McpServerConfig,
+    workspace_dir: &Path,
+    workspace_root: &Path,
+    workspace_type: WorkspaceType,
+    workspace_env: &HashMap<String, String>,
+    shared_network: Option<bool>,
+) -> serde_json::Value {
+    fn resolve_host_command_path(cmd: &str) -> String {
+        let cmd_path = Path::new(cmd);
+        if cmd_path.is_absolute() || cmd.contains('/') {
+            return cmd.to_string();
+        }
+
+        let candidates = [
+            Path::new("/usr/local/bin").join(cmd),
+            Path::new("/usr/bin").join(cmd),
+        ];
+
+        for candidate in candidates.iter() {
+            if candidate.exists() {
+                return candidate.to_string_lossy().to_string();
+            }
+        }
+
+        cmd.to_string()
+    }
+
+    fn resolve_container_command_path(
+        cmd: &str,
+        container_root_host: &Path,
+        container_fallback: bool,
+        per_workspace_runner: bool,
+    ) -> String {
+        // Only needed when the harness spawns MCP servers inside the container.
+        // In container fallback mode, commands run on the host, so host paths are correct.
+        if container_fallback || !per_workspace_runner {
+            return resolve_host_command_path(cmd);
+        }
+
+        let cmd_path = Path::new(cmd);
+        let cmd_has_path = cmd_path.is_absolute() || cmd.contains('/');
+
+        // If the MCP config hardcodes an absolute path (e.g. /usr/bin/bunx), validate it
+        // exists in the container rootfs. If it doesn't, try common fallbacks.
+        if cmd_has_path && cmd_path.is_absolute() {
+            let host_candidate = container_root_host.join(cmd.trim_start_matches('/'));
+            if host_candidate.exists() {
+                return cmd.to_string();
+            }
+
+            // Common mismatch: host resolves to /usr/bin, container uses /usr/local/bin.
+            if let Some(base) = cmd_path.file_name().and_then(|n| n.to_str()) {
+                let host_usr_local = container_root_host.join("usr/local/bin").join(base);
+                if host_usr_local.exists() {
+                    return format!("/usr/local/bin/{}", base);
+                }
+
+                let host_usr_bin = container_root_host.join("usr/bin").join(base);
+                if host_usr_bin.exists() {
+                    return format!("/usr/bin/{}", base);
+                }
+            }
+
+            return cmd.to_string();
+        }
+
+        // Bare command: prefer /usr/local/bin then /usr/bin inside the container.
+        if !cmd_has_path {
+            let host_usr_local = container_root_host.join("usr/local/bin").join(cmd);
+            if host_usr_local.exists() {
+                return format!("/usr/local/bin/{}", cmd);
+            }
+
+            let host_usr_bin = container_root_host.join("usr/bin").join(cmd);
+            if host_usr_bin.exists() {
+                return format!("/usr/bin/{}", cmd);
+            }
+        }
+
+        // Relative paths (e.g. ./scripts/foo) should remain as-is.
+        cmd.to_string()
+    }
+
+    match &config.transport {
+        McpTransport::Http { endpoint, headers } => {
+            let mut entry = serde_json::Map::new();
+            entry.insert("type".to_string(), json!("http"));
+            entry.insert("endpoint".to_string(), json!(endpoint));
+            entry.insert("enabled".to_string(), json!(config.enabled));
+            if !headers.is_empty() {
+                entry.insert("headers".to_string(), json!(headers));
+            }
+            json!(entry)
+        }
+        McpTransport::Stdio { command, args, env } => {
+            let mut entry = serde_json::Map::new();
+            entry.insert("type".to_string(), json!("local"));
+
+            let mut merged_env = env.clone();
+            if !workspace_env.is_empty() {
+                for (key, value) in workspace_env {
+                    merged_env
+                        .entry(key.clone())
+                        .or_insert_with(|| value.clone());
+                }
+                let workspace_env_json =
+                    serde_json::to_string(workspace_env).unwrap_or_else(|_| "{}".to_string());
+                merged_env
+                    .entry("SANDBOXED_SH_WORKSPACE_ENV_VARS".to_string())
+                    .or_insert(workspace_env_json);
+            }
+            merged_env
+                .entry("SANDBOXED_SH_WORKSPACE".to_string())
+                .or_insert_with(|| workspace_dir.to_string_lossy().to_string());
+            merged_env
+                .entry("SANDBOXED_SH_WORKSPACE_ROOT".to_string())
+                .or_insert_with(|| workspace_root.to_string_lossy().to_string());
+            merged_env
+                .entry("SANDBOXED_SH_WORKSPACE_TYPE".to_string())
+                .or_insert_with(|| workspace_type.as_str().to_string());
+            merged_env
+                .entry("WORKING_DIR".to_string())
+                .or_insert_with(|| workspace_dir.to_string_lossy().to_string());
+            if workspace_type == WorkspaceType::Container {
+                if let Some(name) = workspace_root.file_name().and_then(|n| n.to_str()) {
+                    if !name.trim().is_empty() {
+                        merged_env
+                            .entry("SANDBOXED_SH_WORKSPACE_NAME".to_string())
+                            .or_insert_with(|| name.to_string());
+                    }
+                }
+            }
+            if let Ok(runtime_workspace_file) = std::env::var("SANDBOXED_SH_RUNTIME_WORKSPACE_FILE")
+            {
+                if !runtime_workspace_file.trim().is_empty() {
+                    merged_env
+                        .entry("SANDBOXED_SH_RUNTIME_WORKSPACE_FILE".to_string())
+                        .or_insert(runtime_workspace_file);
+                }
+            }
+
+            let container_fallback = workspace_env
+                .get("SANDBOXED_SH_CONTAINER_FALLBACK")
+                .map(|v| {
+                    matches!(
+                        v.trim().to_lowercase().as_str(),
+                        "1" | "true" | "yes" | "y" | "on"
+                    )
+                })
+                .unwrap_or(false)
+                || (workspace_type == WorkspaceType::Container && !nspawn::nspawn_available());
+            let per_workspace_runner = env_var_bool("SANDBOXED_SH_PER_WORKSPACE_RUNNER", true);
+            if container_fallback {
+                merged_env
+                    .entry("SANDBOXED_SH_CONTAINER_FALLBACK".to_string())
+                    .or_insert_with(|| "1".to_string());
+            }
+
+            let use_nspawn = config.scope == McpScope::Workspace
+                && workspace_type == WorkspaceType::Container
+                && !container_fallback
+                && !per_workspace_runner
+                && nspawn::nspawn_available();
+
+            if use_nspawn {
+                let rel = workspace_dir
+                    .strip_prefix(workspace_root)
+                    .unwrap_or_else(|_| Path::new(""));
+                let rel_str = if rel.as_os_str().is_empty() {
+                    "/".to_string()
+                } else {
+                    format!("/{}", rel.to_string_lossy())
+                };
+
+                let mut nspawn_env = merged_env.clone();
+                nspawn_env.insert("SANDBOXED_SH_WORKSPACE".to_string(), rel_str.clone());
+                nspawn_env.insert("SANDBOXED_SH_WORKSPACE_ROOT".to_string(), "/".to_string());
+                nspawn_env.insert("WORKING_DIR".to_string(), rel_str.clone());
+
+                let mut cmd = vec![
+                    resolve_host_command_path("systemd-nspawn"),
+                    "-D".to_string(),
+                    workspace_root.to_string_lossy().to_string(),
+                    "--quiet".to_string(),
+                    "--timezone=off".to_string(),
+                    "--console=pipe".to_string(),
+                    "--chdir".to_string(),
+                    rel_str,
+                ];
+                // For container workspaces, bind-mount the GLOBAL context root into the container.
+                // Mission context files are stored in the global context root (e.g., /root/context/{mission_id}),
+                // NOT in a workspace-specific directory. The global context root must be bind-mounted
+                // so that the symlink inside the container (`context -> /root/context/{mission_id}`) resolves.
+                let context_dir_name = std::env::var("SANDBOXED_SH_CONTEXT_DIR_NAME")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| "context".to_string());
+                // Get the global context root from env var, then WORKING_DIR/context.
+                // Avoid falling back to /root/context when the service has an
+                // isolated working directory; /root/context can be a
+                // mission-local symlink from older runs.
+                let global_context_root = std::env::var("SANDBOXED_SH_CONTEXT_ROOT")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+                    .map(PathBuf::from)
+                    .or_else(|| {
+                        std::env::var("WORKING_DIR")
+                            .ok()
+                            .filter(|s| !s.trim().is_empty())
+                            .map(|dir| PathBuf::from(dir).join(&context_dir_name))
+                    })
+                    .unwrap_or_else(|| PathBuf::from("/root").join(&context_dir_name));
+                // Create the context directory if it doesn't exist
+                let _ = std::fs::create_dir_all(&global_context_root);
+                if global_context_root.exists() {
+                    cmd.push(format!(
+                        "--bind={}:/root/context",
+                        global_context_root.display()
+                    ));
+                    nspawn_env.insert(
+                        "SANDBOXED_SH_CONTEXT_ROOT".to_string(),
+                        "/root/context".to_string(),
+                    );
+                    nspawn_env.insert(
+                        "SANDBOXED_SH_CONTEXT_DIR_NAME".to_string(),
+                        context_dir_name,
+                    );
+                }
+
+                // Network configuration based on shared_network setting:
+                // - shared_network=true (default): Share host network, bind-mount /etc/resolv.conf for DNS
+                // - shared_network=false: Isolated network (--network-veth), used with Tailscale
+                let use_shared_network = shared_network.unwrap_or(true);
+                if use_shared_network {
+                    // Bind-mount host's resolv.conf for DNS resolution in shared network mode
+                    cmd.push("--bind-ro=/etc/resolv.conf".to_string());
+                } else {
+                    // Isolated network mode - check if Tailscale is configured
+                    let tailscale_args = nspawn::tailscale_nspawn_extra_args(&merged_env);
+                    if tailscale_args.is_empty() {
+                        // Tailscale not configured - fall back to binding resolv.conf for DNS
+                        // This ensures DNS works even if the user sets shared_network=false
+                        // without proper Tailscale configuration
+                        cmd.push("--bind-ro=/etc/resolv.conf".to_string());
+                    } else {
+                        // Tailscale configured - it handles networking and DNS
+                        cmd.extend(tailscale_args);
+                    }
+                }
+                for (key, value) in &nspawn_env {
+                    cmd.push(format!("--setenv={}={}", key, value));
+                }
+                cmd.push(command.clone());
+                cmd.extend(args.clone());
+                entry.insert("command".to_string(), json!(cmd));
+            } else {
+                // When per_workspace_runner is true and workspace is a container,
+                // the harness (Claude Code / OpenCode) runs inside the container
+                // and spawns MCP servers as subprocesses. Env vars must use
+                // container-relative paths, not host paths.
+                if workspace_type == WorkspaceType::Container
+                    && per_workspace_runner
+                    && !container_fallback
+                {
+                    let rel = workspace_dir
+                        .strip_prefix(workspace_root)
+                        .unwrap_or_else(|_| Path::new(""));
+                    let rel_str = if rel.as_os_str().is_empty() {
+                        "/".to_string()
+                    } else {
+                        format!("/{}", rel.to_string_lossy())
+                    };
+                    merged_env.insert("SANDBOXED_SH_WORKSPACE".to_string(), rel_str.clone());
+                    merged_env.insert("SANDBOXED_SH_WORKSPACE_ROOT".to_string(), "/".to_string());
+                    merged_env.insert("WORKING_DIR".to_string(), rel_str);
+                }
+
+                let resolved_command = match workspace_type {
+                    WorkspaceType::Container => resolve_container_command_path(
+                        command,
+                        workspace_root,
+                        container_fallback,
+                        per_workspace_runner,
+                    ),
+                    WorkspaceType::Host => resolve_host_command_path(command),
+                };
+                let mut cmd = vec![resolved_command];
+                cmd.extend(args.clone());
+                entry.insert("command".to_string(), json!(cmd));
+                if !merged_env.is_empty() {
+                    entry.insert("environment".to_string(), json!(merged_env));
+                }
+            }
+            entry.insert("enabled".to_string(), json!(config.enabled));
+            serde_json::Value::Object(entry)
+        }
+    }
+}
+
+fn claude_entry_from_mcp(
+    config: &McpServerConfig,
+    workspace_dir: &Path,
+    workspace_root: &Path,
+    workspace_type: WorkspaceType,
+    workspace_env: &HashMap<String, String>,
+    workspace_env_file: Option<&str>,
+    shared_network: Option<bool>,
+) -> serde_json::Value {
+    match &config.transport {
+        McpTransport::Http { endpoint, headers } => {
+            let mut entry = serde_json::Map::new();
+            entry.insert("type".to_string(), json!("http"));
+            entry.insert("url".to_string(), json!(endpoint));
+            if !headers.is_empty() {
+                entry.insert("headers".to_string(), json!(headers));
+            }
+            serde_json::Value::Object(entry)
+        }
+        McpTransport::Stdio { .. } => {
+            let opencode_entry = opencode_entry_from_mcp(
+                config,
+                workspace_dir,
+                workspace_root,
+                workspace_type,
+                workspace_env,
+                shared_network,
+            );
+
+            let command_vec = opencode_entry
+                .get("command")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let command = command_vec
+                .first()
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let args: Vec<String> = command_vec
+                .iter()
+                .skip(1)
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+
+            let mut entry = serde_json::Map::new();
+            entry.insert("command".to_string(), json!(command));
+            entry.insert("args".to_string(), json!(args));
+
+            if let Some(env) = opencode_entry
+                .get("environment")
+                .and_then(|v| v.as_object())
+            {
+                let mut env_map = env.clone();
+                if let Some(env_file) = workspace_env_file {
+                    env_map.remove("SANDBOXED_SH_WORKSPACE_ENV_VARS");
+                    env_map.insert(
+                        "SANDBOXED_SH_WORKSPACE_ENV_VARS_FILE".to_string(),
+                        json!(env_file),
+                    );
+                }
+                entry.insert("env".to_string(), serde_json::Value::Object(env_map));
+            }
+
+            serde_json::Value::Object(entry)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn write_opencode_config(
+    workspace_dir: &Path,
+    mcp_configs: Vec<McpServerConfig>,
+    workspace_root: &Path,
+    workspace_type: WorkspaceType,
+    workspace_env: &HashMap<String, String>,
+    skill_allowlist: Option<&[String]>,
+    command_contents: Option<&[CommandContent]>,
+    shared_network: Option<bool>,
+    custom_providers: Option<&[AIProvider]>,
+) -> anyhow::Result<()> {
+    let mut mcp_map = serde_json::Map::new();
+    let mut used = std::collections::HashSet::new();
+    let has_desktop_mcp = mcp_configs
+        .iter()
+        .any(|config| config.enabled && config.name == "desktop");
+
+    let filtered_configs = mcp_configs.into_iter().filter(|c| {
+        if !c.enabled {
+            return false;
+        }
+        true
+    });
+
+    for config in filtered_configs {
+        let base = sanitize_key(&config.name);
+        let key = unique_key(&base, &mut used);
+        mcp_map.insert(
+            key,
+            opencode_entry_from_mcp(
+                &config,
+                workspace_dir,
+                workspace_root,
+                workspace_type,
+                workspace_env,
+                shared_network,
+            ),
+        );
+    }
+
+    let mut permission = serde_json::Map::new();
+    permission.insert("read".to_string(), json!("allow"));
+    permission.insert("edit".to_string(), json!("allow"));
+    permission.insert("glob".to_string(), json!("allow"));
+    permission.insert("grep".to_string(), json!("allow"));
+    permission.insert("list".to_string(), json!("allow"));
+    permission.insert("bash".to_string(), json!("allow"));
+    permission.insert("task".to_string(), json!("allow"));
+    permission.insert("external_directory".to_string(), json!("allow"));
+    permission.insert("todowrite".to_string(), json!("allow"));
+    permission.insert("todoread".to_string(), json!("allow"));
+    permission.insert("question".to_string(), json!("allow"));
+    permission.insert("webfetch".to_string(), json!("allow"));
+    permission.insert("websearch".to_string(), json!("allow"));
+    permission.insert("codesearch".to_string(), json!("allow"));
+    permission.insert("lsp".to_string(), json!("allow"));
+    permission.insert("doom_loop".to_string(), json!("allow"));
+
+    if let Some(skills) = skill_allowlist {
+        if !skills.is_empty() {
+            let mut skill_permissions = serde_json::Map::new();
+            skill_permissions.insert("*".to_string(), json!("deny"));
+            for skill in skills {
+                skill_permissions.insert(skill.clone(), json!("allow"));
+            }
+            permission.insert(
+                "skill".to_string(),
+                serde_json::Value::Object(skill_permissions),
+            );
+        }
+    }
+    let workspace_desktop_flag = workspace_env
+        .get("SANDBOXED_SH_ENABLE_DESKTOP_TOOLS")
+        .or_else(|| workspace_env.get("DESKTOP_ENABLED"))
+        .map(|value| {
+            matches!(
+                value.trim().to_lowercase().as_str(),
+                "1" | "true" | "yes" | "y" | "on"
+            )
+        })
+        .unwrap_or(false);
+    let workspace_has_display = workspace_env.contains_key("DISPLAY");
+
+    // Tool policy:
+    // - We want shell/file effects scoped to the workspace by running the agent process
+    //   inside the workspace execution context (host/container).
+    // - Therefore, OpenCode built-in bash MUST be enabled for all workspace types.
+    // - The legacy workspace-mcp/desktop-mcp proxy tools are no longer required for core flows.
+    // - Enable desktop tools automatically when a desktop MCP exists or the workspace advertises
+    //   a display (browser/X11 templates), even if global env flags are unset.
+    let enable_desktop_tools = env_var_bool("SANDBOXED_SH_ENABLE_DESKTOP_TOOLS", false)
+        || env_var_bool("DESKTOP_ENABLED", false)
+        || workspace_desktop_flag
+        || workspace_has_display
+        || has_desktop_mcp;
+    let container_fallback = workspace_env
+        .get("SANDBOXED_SH_CONTAINER_FALLBACK")
+        .map(|v| {
+            matches!(
+                v.trim().to_lowercase().as_str(),
+                "1" | "true" | "yes" | "y" | "on"
+            )
+        })
+        .unwrap_or(false);
+    let per_workspace_runner = env_var_bool("SANDBOXED_SH_PER_WORKSPACE_RUNNER", true);
+    let mut tools = serde_json::Map::new();
+    match workspace_type {
+        WorkspaceType::Container => {
+            // Container workspace: OpenCode runs inside the container, so built-in bash is safe.
+            tools.insert("Bash".to_string(), json!(true));
+            tools.insert("bash".to_string(), json!(true));
+            // Disable legacy MCP tool namespaces by default.
+            tools.insert("workspace_*".to_string(), json!(false));
+            tools.insert(
+                "desktop_*".to_string(),
+                json!(enable_desktop_tools && (container_fallback || per_workspace_runner)),
+            );
+            tools.insert("playwright_*".to_string(), json!(true));
+            tools.insert("browser_*".to_string(), json!(true));
+        }
+        WorkspaceType::Host => {
+            tools.insert("Bash".to_string(), json!(true));
+            tools.insert("bash".to_string(), json!(true));
+            tools.insert("workspace_*".to_string(), json!(false));
+            tools.insert("desktop_*".to_string(), json!(enable_desktop_tools));
+            tools.insert("playwright_*".to_string(), json!(false));
+            tools.insert("browser_*".to_string(), json!(false));
+        }
+    }
+    let mut base_config = serde_json::json!({});
+    let base_dir = resolve_opencode_config_dir();
+    let base_path = base_dir.join("opencode.json");
+    let base_jsonc = base_dir.join("opencode.jsonc");
+    let base_contents = if base_path.exists() {
+        tokio::fs::read_to_string(&base_path).await.ok()
+    } else if base_jsonc.exists() {
+        tokio::fs::read_to_string(&base_jsonc).await.ok()
+    } else {
+        None
+    };
+
+    if let Some(contents) = base_contents {
+        match serde_json::from_str::<serde_json::Value>(&contents) {
+            Ok(value) => base_config = value,
+            Err(_) => {
+                let stripped = strip_jsonc_comments(&contents);
+                match serde_json::from_str::<serde_json::Value>(&stripped) {
+                    Ok(value) => base_config = value,
+                    Err(e) => {
+                        tracing::warn!("Failed to parse OpenCode base config: {}", e);
+                    }
+                }
+            }
+        }
+    }
+
+    if !base_config.is_object() {
+        base_config = serde_json::json!({});
+    }
+
+    {
+        let base_obj = base_config.as_object_mut().expect("opencode base config");
+        base_obj.insert(
+            "$schema".to_string(),
+            json!("https://opencode.ai/config.json"),
+        );
+        base_obj.insert("mcp".to_string(), serde_json::Value::Object(mcp_map));
+        base_obj.insert(
+            "permission".to_string(),
+            serde_json::Value::Object(permission),
+        );
+        base_obj.insert("tools".to_string(), serde_json::Value::Object(tools));
+
+        // Add custom providers if any
+        if let Some(providers) = custom_providers {
+            let custom_only: Vec<_> = providers
+                .iter()
+                .filter(|p| p.provider_type == ProviderType::Custom && p.enabled)
+                .collect();
+
+            if !custom_only.is_empty() {
+                let mut provider_map = serde_json::Map::new();
+
+                for provider in custom_only {
+                    let provider_id = sanitize_key(&provider.name);
+                    let mut provider_config = serde_json::Map::new();
+
+                    // Set npm package (default to openai-compatible)
+                    let npm = provider
+                        .npm_package
+                        .as_deref()
+                        .unwrap_or("@ai-sdk/openai-compatible");
+                    provider_config.insert("npm".to_string(), json!(npm));
+
+                    // Set provider name
+                    provider_config.insert("name".to_string(), json!(&provider.name));
+
+                    // Build options
+                    let mut options = serde_json::Map::new();
+                    if let Some(base_url) = &provider.base_url {
+                        options.insert("baseURL".to_string(), json!(base_url));
+                    }
+
+                    // API key: either direct value or env var reference
+                    if let Some(api_key) = &provider.api_key {
+                        options.insert("apiKey".to_string(), json!(api_key));
+                    } else if let Some(env_var) = &provider.custom_env_var {
+                        options.insert("apiKey".to_string(), json!(format!("{{env:{}}}", env_var)));
+                    }
+                    // API key is optional - some providers may not need it
+
+                    if !options.is_empty() {
+                        provider_config
+                            .insert("options".to_string(), serde_json::Value::Object(options));
+                    }
+
+                    // Build models config
+                    if let Some(models) = &provider.custom_models {
+                        let mut models_map = serde_json::Map::new();
+                        for model in models {
+                            let mut model_config = serde_json::Map::new();
+
+                            if let Some(name) = &model.name {
+                                model_config.insert("name".to_string(), json!(name));
+                            }
+
+                            // Build limit config if either limit is set
+                            if model.context_limit.is_some() || model.output_limit.is_some() {
+                                let mut limit = serde_json::Map::new();
+                                if let Some(context) = model.context_limit {
+                                    limit.insert("context".to_string(), json!(context));
+                                }
+                                if let Some(output) = model.output_limit {
+                                    limit.insert("output".to_string(), json!(output));
+                                }
+                                model_config
+                                    .insert("limit".to_string(), serde_json::Value::Object(limit));
+                            }
+
+                            models_map
+                                .insert(model.id.clone(), serde_json::Value::Object(model_config));
+                        }
+                        if !models_map.is_empty() {
+                            provider_config.insert(
+                                "models".to_string(),
+                                serde_json::Value::Object(models_map),
+                            );
+                        }
+                    }
+
+                    provider_map.insert(provider_id, serde_json::Value::Object(provider_config));
+                }
+
+                if !provider_map.is_empty() {
+                    base_obj.insert(
+                        "provider".to_string(),
+                        serde_json::Value::Object(provider_map),
+                    );
+                }
+            }
+        }
+    }
+
+    let config_value = base_config;
+    let config_payload = serde_json::to_string_pretty(&config_value)?;
+
+    // Write to workspace root
+    let config_path = workspace_dir.join("opencode.json");
+    tokio::fs::write(&config_path, &config_payload).await?;
+
+    // Also write to .opencode/ for OpenCode config discovery
+    let opencode_dir = workspace_dir.join(".opencode");
+    tokio::fs::create_dir_all(&opencode_dir).await?;
+    let opencode_config_path = opencode_dir.join("opencode.json");
+    tokio::fs::write(opencode_config_path, config_payload).await?;
+
+    // Write commands as skills for OpenCode (since OpenCode doesn't have a separate command system)
+    if let Some(commands) = command_contents {
+        write_commands_as_opencode_skills(workspace_dir, commands).await?;
+    }
+
+    // Write Claude PreToolUse hooks for Claude-compatible execution.
+    // These fix gh CLI hanging in PTY, optionally enable RTK compression for
+    // native Bash, and block oversized image Reads before provider submission.
+    if let Some(hooks) =
+        write_claude_pretool_hooks(workspace_dir, workspace_root, workspace_type).await?
+    {
+        let claude_dir = workspace_dir.join(".claude");
+        tokio::fs::create_dir_all(&claude_dir).await?;
+        let settings = json!({ "hooks": hooks });
+        let settings_content = serde_json::to_string_pretty(&settings)?;
+        let settings_path = claude_dir.join("settings.local.json");
+        tokio::fs::write(&settings_path, &settings_content).await?;
+        tracing::info!("Claude hooks written to .claude/settings.local.json for OpenCode backend");
+    }
+
+    Ok(())
+}
+
+/// Write Claude Code `PreToolUse` hooks for workspace execution.
+///
+/// The Bash hook always exists because it fixes `gh` hanging in PTY contexts,
+/// and optionally prefixes eligible commands with `rtk` when enabled.
+///
+/// The Read hook blocks oversized image reads before Claude Code serializes the
+/// image into the next model request. Anthropic applies a 2000px per-dimension
+/// limit when a request contains many images; one oversized screenshot can poison
+/// the session context and make the next model call fail before the agent gets a
+/// chance to recover.
+/// Returns the `hooks` JSON value to embed in `.claude/settings.local.json`,
+/// or `None` when no hooks were written.
+///
+/// For container workspaces, the RTK binary is copied from the host into
+/// the container's `/usr/local/bin/`, and paths in the hook config are
+/// translated to container-relative paths.
+///
+/// For the OpenCode backend this also keeps Claude-compatible tool hooks available.
+async fn write_claude_pretool_hooks(
+    workspace_dir: &Path,
+    workspace_root: &Path,
+    workspace_type: WorkspaceType,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    let use_rtk = rtk_enabled();
+
+    // For container workspaces, copy the RTK binary from host into the container
+    let is_container = workspace_type == WorkspaceType::Container && nspawn::nspawn_available();
+    if use_rtk && is_container {
+        if let Some(host_rtk) = rtk_binary_path() {
+            let dest_dir = workspace_root.join("usr").join("local").join("bin");
+            std::fs::create_dir_all(&dest_dir).ok();
+            let dest = dest_dir.join("rtk");
+            if !dest.exists() {
+                if let Err(e) = std::fs::copy(&host_rtk, &dest) {
+                    tracing::warn!(
+                        src = %host_rtk.display(),
+                        dest = %dest.display(),
+                        "Failed to copy RTK binary into container: {}", e
+                    );
+                } else {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ =
+                            std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755));
+                    }
+                    tracing::info!(
+                        dest = %dest.display(),
+                        "Copied RTK binary into container"
+                    );
+                }
+            }
+        } else {
+            tracing::warn!("RTK enabled but binary not found on host");
+        }
+    }
+
+    // Write the Bash hook script to .claude/hooks/bash-pretool.sh.
+    // See `render_bash_pretool_script` for the script body.
+    let hooks_dir = workspace_dir.join(".claude").join("hooks");
+    tokio::fs::create_dir_all(&hooks_dir).await?;
+    let hook_path = hooks_dir.join("bash-pretool.sh");
+    let hook_script = render_bash_pretool_script(use_rtk);
+    tokio::fs::write(&hook_path, &hook_script).await?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o755);
+        std::fs::set_permissions(&hook_path, perms)?;
+    }
+
+    // For container workspaces, translate the hook path from host to container-relative
+    let hook_command = if is_container {
+        if let Ok(rel) = hook_path.strip_prefix(workspace_root) {
+            format!("/{}", rel.to_string_lossy())
+        } else {
+            hook_path.to_string_lossy().to_string()
+        }
+    } else {
+        hook_path.to_string_lossy().to_string()
+    };
+    tracing::info!(
+        hook_path = %hook_command,
+        is_container = is_container,
+        use_rtk = use_rtk,
+        "Bash PreToolUse hook written"
+    );
+
+    let image_hook_path = hooks_dir.join("image-read-pretool.sh");
+    let image_hook_script = r#"#!/bin/bash
+# PreToolUse hook for Read. Blocks oversized PNG/JPEG images before Claude Code
+# embeds them in a provider request that may contain many images.
+set -euo pipefail
+
+INPUT=$(cat)
+
+if ! command -v python3 >/dev/null 2>&1; then
+  exit 0
+fi
+
+export CLAUDE_HOOK_INPUT="$INPUT"
+python3 <<'PY'
+import json
+import os
+import struct
+import sys
+
+MAX_DIMENSION = 2000
+
+def png_dimensions(data):
+    if len(data) >= 24 and data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return struct.unpack(">II", data[16:24])
+    return None
+
+def jpeg_dimensions(path):
+    with open(path, "rb") as f:
+        if f.read(2) != b"\xff\xd8":
+            return None
+        while True:
+            marker_prefix = f.read(1)
+            if not marker_prefix:
+                return None
+            if marker_prefix != b"\xff":
+                continue
+            marker = f.read(1)
+            while marker == b"\xff":
+                marker = f.read(1)
+            if not marker:
+                return None
+            code = marker[0]
+            if code in (0xD8, 0xD9):
+                continue
+            length_bytes = f.read(2)
+            if len(length_bytes) != 2:
+                return None
+            length = struct.unpack(">H", length_bytes)[0]
+            if length < 2:
+                return None
+            if code in {
+                0xC0, 0xC1, 0xC2, 0xC3,
+                0xC5, 0xC6, 0xC7,
+                0xC9, 0xCA, 0xCB,
+                0xCD, 0xCE, 0xCF,
+            }:
+                segment = f.read(length - 2)
+                if len(segment) >= 5:
+                    height, width = struct.unpack(">HH", segment[1:5])
+                    return width, height
+                return None
+            f.seek(length - 2, os.SEEK_CUR)
+
+def image_dimensions(path):
+    try:
+        with open(path, "rb") as f:
+            head = f.read(32)
+        dims = png_dimensions(head)
+        if dims:
+            return dims
+        return jpeg_dimensions(path)
+    except Exception:
+        return None
+
+def main():
+    try:
+        payload = json.loads(os.environ.get("CLAUDE_HOOK_INPUT", "{}"))
+    except Exception:
+        return 0
+
+    tool_input = payload.get("tool_input") or {}
+    path = tool_input.get("file_path") or tool_input.get("path")
+    if not isinstance(path, str) or not path:
+        return 0
+    if not os.path.isfile(path):
+        return 0
+
+    dims = image_dimensions(path)
+    if not dims:
+        return 0
+    width, height = dims
+    if width <= MAX_DIMENSION and height <= MAX_DIMENSION:
+        return 0
+
+    reason = (
+        f"Refusing to Read oversized image {path} ({width}x{height}). "
+        "Claude provider requests with many images allow at most 2000 pixels per dimension. "
+        "Downscale or rerender this image first, then Read the smaller file. "
+        "For PDF screenshots, use a lower pdftoppm DPI such as -r 120, or use pdftotext when text is sufficient."
+    )
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }))
+    return 0
+
+sys.exit(main())
+PY
+"#;
+    tokio::fs::write(&image_hook_path, image_hook_script).await?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o755);
+        std::fs::set_permissions(&image_hook_path, perms)?;
+    }
+
+    let image_hook_command = if is_container {
+        if let Ok(rel) = image_hook_path.strip_prefix(workspace_root) {
+            format!("/{}", rel.to_string_lossy())
+        } else {
+            image_hook_path.to_string_lossy().to_string()
+        }
+    } else {
+        image_hook_path.to_string_lossy().to_string()
+    };
+    tracing::info!(
+        hook_path = %image_hook_command,
+        is_container = is_container,
+        max_dimension = 2000,
+        "Image Read PreToolUse hook written"
+    );
+
+    Ok(Some(json!({
+        "PreToolUse": [
+            {
+                "matcher": "Bash",
+                "hooks": [{
+                    "type": "command",
+                    "command": hook_command
+                }]
+            },
+            {
+                "matcher": "Read",
+                "hooks": [{
+                    "type": "command",
+                    "command": image_hook_command
+                }]
+            }
+        ]
+    })))
+}
+
+/// Render the Claude Code Bash `PreToolUse` hook script.
+///
+/// The hook has two responsibilities, independently toggleable:
+/// 1. **gh terminal fix** (always on): wraps `gh` commands with `env TERM=dumb`
+///    so lipgloss/glamour stops issuing terminal capability queries that hang
+///    forever in our PTY. This is a bugfix unrelated to RTK.
+/// 2. **RTK compression** (gated on `use_rtk`): when the dashboard RTK setting
+///    is enabled, rewrites eligible commands to their `rtk <sub>` equivalents.
+///    When disabled, the hook leaves commands alone even if `rtk` is installed.
+///
+/// The `use_rtk` flag is baked into the script at workspace preparation time,
+/// so toggling the dashboard setting only takes effect for workspaces prepared
+/// after the toggle.
+fn render_bash_pretool_script(use_rtk: bool) -> String {
+    let rtk_flag = if use_rtk { "true" } else { "false" };
+    format!(
+        r#"#!/bin/bash
+# PreToolUse hook for Bash commands.
+# 1. Fixes gh CLI hanging in PTY by setting TERM=dumb (prevents lipgloss terminal queries)
+# 2. Optionally rewrites commands to use RTK for token compression
+set -euo pipefail
+
+# Baked in at workspace preparation time from the dashboard RTK setting.
+RTK_ENABLED={rtk_flag}
+
+INPUT=$(cat)
+COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty')
+
+# Skip if empty or already wrapped
+if [ -z "$COMMAND" ]; then exit 0; fi
+case "$COMMAND" in
+  rtk\ *|/*/rtk\ *) exit 0 ;;
+esac
+# Skip compound commands (pipes, chains, heredocs, subshells, semicolons)
+case "$COMMAND" in
+  *"&&"*|*"||"*|*"|"*|*"<<"*|*"("*|*";"*|*'`'*|*'$('*) exit 0 ;;
+esac
+
+# Extract the base command (first word, ignoring path prefix)
+FIRST_WORD=$(echo "$COMMAND" | awk '{{print $1}}')
+BASE_CMD=$(basename "$FIRST_WORD")
+REST=$(echo "$COMMAND" | sed "s|^[^ ]* *||")
+
+emit_rewrite() {{
+  jq -n --arg cmd "$1" '{{
+    hookSpecificOutput: {{
+      hookEventName: "PreToolUse",
+      permissionDecision: "allow",
+      updatedInput: {{ command: $cmd }}
+    }}
+  }}'
+}}
+
+# Find rtk binary only when the dashboard setting is on.
+RTK_PATH=""
+if [ "$RTK_ENABLED" = "true" ]; then
+  for p in /usr/local/bin/rtk /usr/bin/rtk; do
+    if [ -x "$p" ]; then RTK_PATH="$p"; break; fi
+  done
+fi
+
+# Map base commands to RTK subcommands (only commands RTK natively supports)
+RTK_SUB=""
+if [ -n "$RTK_PATH" ]; then
+  case "$BASE_CMD" in
+    ls)        RTK_SUB="ls" ;;
+    tree)      RTK_SUB="tree" ;;
+    git)       RTK_SUB="git" ;;
+    gh)        RTK_SUB="gh" ;;
+    grep|rg)   RTK_SUB="grep" ;;
+    cargo)     RTK_SUB="cargo" ;;
+    npm)       RTK_SUB="npm" ;;
+    npx)       RTK_SUB="npx" ;;
+    bun)       RTK_SUB="npm" ;;
+    bunx)      RTK_SUB="npx" ;;
+    pnpm)      RTK_SUB="pnpm" ;;
+    docker)    RTK_SUB="docker" ;;
+    kubectl)   RTK_SUB="kubectl" ;;
+    vitest)    RTK_SUB="vitest" ;;
+    pytest)    RTK_SUB="pytest" ;;
+    go)        RTK_SUB="go" ;;
+    tsc)       RTK_SUB="tsc" ;;
+    eslint)    RTK_SUB="lint" ;;
+    ruff)      RTK_SUB="ruff" ;;
+    curl)      RTK_SUB="curl" ;;
+    pip|uv)    RTK_SUB="pip" ;;
+    diff)      RTK_SUB="diff" ;;
+  esac
+fi
+
+# If RTK supports this command, rewrite to use RTK (which pipes internally, fixing PTY too)
+if [ -n "$RTK_SUB" ]; then
+  if [ -n "$REST" ]; then
+    emit_rewrite "$RTK_PATH $RTK_SUB -- $REST"
+  else
+    emit_rewrite "$RTK_PATH $RTK_SUB"
+  fi
+  exit 0
+fi
+
+# No RTK available — still fix gh commands that hang in PTY environments.
+# The gh CLI (via lipgloss/glamour) sends terminal capability queries like
+# OSC 11 (background color) and DSR (cursor position) when TERM != dumb.
+# Our PTY has no terminal emulator to respond, causing indefinite hangs.
+case "$BASE_CMD" in
+  gh)
+    emit_rewrite "env TERM=dumb $COMMAND"
+    exit 0
+    ;;
+esac
+
+exit 0
+"#
+    )
+}
+
+/// Deep-merge `overlay` into `base`.
+/// - Objects: recurse; overlay scalar wins on conflict
+/// - Arrays: concatenate (base first, then overlay)
+/// - Scalars / type mismatch: overlay replaces base
+fn merge_json(base: &mut serde_json::Value, overlay: &serde_json::Value) {
+    match (base, overlay) {
+        (serde_json::Value::Object(b), serde_json::Value::Object(o)) => {
+            for (k, v) in o {
+                merge_json(b.entry(k.clone()).or_insert(serde_json::Value::Null), v);
+            }
+        }
+        (serde_json::Value::Array(b), serde_json::Value::Array(o)) => {
+            b.extend(o.iter().cloned());
+        }
+        (base, overlay) => *base = overlay.clone(),
+    }
+}
+
+/// Write Claude Code configuration to the workspace.
+/// Generates `.claude/settings.local.json` and `CLAUDE.md` files.
+#[allow(clippy::too_many_arguments)]
+async fn write_claudecode_config(
+    workspace_dir: &Path,
+    mcp_configs: Vec<McpServerConfig>,
+    workspace_root: &Path,
+    workspace_type: WorkspaceType,
+    workspace_env: &HashMap<String, String>,
+    skill_contents: Option<&[SkillContent]>,
+    command_contents: Option<&[CommandContent]>,
+    shared_network: Option<bool>,
+    profile_overlay: Option<&serde_json::Value>,
+) -> anyhow::Result<()> {
+    // Create .claude directory
+    let claude_dir = workspace_dir.join(".claude");
+    tokio::fs::create_dir_all(&claude_dir).await?;
+
+    let workspace_env_file = if !workspace_env.is_empty() {
+        let sandboxed_dir = workspace_dir.join(".sandboxed-sh");
+        tokio::fs::create_dir_all(&sandboxed_dir).await?;
+        let env_path = sandboxed_dir.join("workspace_env.json");
+        let payload = serde_json::to_string_pretty(workspace_env)?;
+        tokio::fs::write(&env_path, payload).await?;
+        Some(".sandboxed-sh/workspace_env.json".to_string())
+    } else {
+        None
+    };
+
+    // Build MCP servers config in Claude Code format
+    let mut mcp_servers = serde_json::Map::new();
+    let mut used = std::collections::HashSet::new();
+
+    let filtered_configs = mcp_configs.into_iter().filter(|c| c.enabled);
+
+    for config in filtered_configs {
+        let base = sanitize_key(&config.name);
+        let key = unique_key(&base, &mut used);
+        mcp_servers.insert(
+            key,
+            claude_entry_from_mcp(
+                &config,
+                workspace_dir,
+                workspace_root,
+                workspace_type,
+                workspace_env,
+                workspace_env_file.as_deref(),
+                shared_network,
+            ),
+        );
+    }
+
+    // Write settings.local.json
+    // Add permissive settings to avoid permission prompts.
+    //
+    // IMPORTANT: Claude Code permission syntax:
+    // - "Bash" (no parentheses) allows ALL bash commands
+    // - "Bash(*)" does NOT work as a wildcard - it's a literal pattern
+    // - "mcp__*" works for MCP tools as a wildcard
+    //
+    // Tool policy:
+    // - Claude Code CLI is executed inside the workspace execution context.
+    // - Therefore, built-in Bash is safe to allow for both host + container workspaces.
+    // - Legacy MCP tools are still allowed as a wildcard for compatibility.
+    let permissions: Vec<&str> = match workspace_type {
+        WorkspaceType::Container => vec!["Bash", "Edit", "Write", "Read", "mcp__*"],
+        WorkspaceType::Host => vec!["Bash", "Edit", "Write", "Read", "mcp__*"],
+    };
+    let mut settings = json!({
+        "mcpServers": mcp_servers,
+        "permissions": {
+            "allow": permissions
+        }
+    });
+
+    // Add Claude PreToolUse hooks: Bash PTY/RTK handling plus image Read guard.
+    if let Some(hooks) =
+        write_claude_pretool_hooks(workspace_dir, workspace_root, workspace_type).await?
+    {
+        settings
+            .as_object_mut()
+            .unwrap()
+            .insert("hooks".to_string(), hooks);
+    }
+
+    // Apply config profile settings: profile is the base, generated settings win on top.
+    // Arrays (e.g. hooks) are concatenated — profile hooks + RTK hooks both survive.
+    if let Some(profile) = profile_overlay {
+        let mut merged = profile.clone();
+        merge_json(&mut merged, &settings);
+        settings = merged;
+    }
+
+    let settings_path = claude_dir.join("settings.local.json");
+    let settings_content = serde_json::to_string_pretty(&settings)?;
+    tokio::fs::write(&settings_path, &settings_content).await?;
+    let settings_json_path = claude_dir.join("settings.json");
+    tokio::fs::write(&settings_json_path, &settings_content).await?;
+
+    // Write a dedicated MCP config for CLI flags like --mcp-config.
+    // Use mcpServers from the merged settings (includes profile overlay MCPs)
+    // rather than only the RTK-generated MCPs.
+    let final_mcp_servers = settings
+        .get("mcpServers")
+        .cloned()
+        .unwrap_or_else(|| json!(mcp_servers));
+    let mcp_only = json!({ "mcpServers": final_mcp_servers });
+    let mcp_content = serde_json::to_string_pretty(&mcp_only)?;
+    let mcp_config_path = claude_dir.join("mcp.json");
+    tokio::fs::write(&mcp_config_path, &mcp_content).await?;
+    // Also write settings under XDG_CONFIG_HOME/claude for Claude CLI XDG lookups.
+    let xdg_claude_dir = workspace_dir.join(".config").join("claude");
+    tokio::fs::create_dir_all(&xdg_claude_dir).await?;
+    let xdg_settings_path = xdg_claude_dir.join("settings.json");
+    tokio::fs::write(&xdg_settings_path, &settings_content).await?;
+    let xdg_settings_local = xdg_claude_dir.join("settings.local.json");
+    tokio::fs::write(&xdg_settings_local, &settings_content).await?;
+    let xdg_mcp_path = xdg_claude_dir.join("mcp.json");
+    tokio::fs::write(&xdg_mcp_path, &mcp_content).await?;
+
+    // Also write settings to ~/.claude so `claude mcp list` sees workspace MCPs.
+    let claude_home = resolve_claudecode_dir(workspace_root, workspace_type, workspace_env);
+    if claude_home != claude_dir {
+        tokio::fs::create_dir_all(&claude_home).await?;
+        let home_settings = claude_home.join("settings.local.json");
+        tokio::fs::write(&home_settings, &settings_content).await?;
+        let home_settings_json = claude_home.join("settings.json");
+        tokio::fs::write(&home_settings_json, &settings_content).await?;
+        let home_mcp = claude_home.join("mcp.json");
+        tokio::fs::write(&home_mcp, &mcp_content).await?;
+    }
+
+    // Write skills to .claude/skills/ using Claude Code's native format
+    // This allows Claude to discover and list skills properly
+    if let Some(skills) = skill_contents {
+        write_claudecode_skills_to_workspace(workspace_dir, skills).await?;
+
+        // Generate minimal CLAUDE.md with workspace context only
+        // Skills are now in .claude/skills/ and Claude will discover them automatically
+        let claude_md_path = workspace_dir.join("CLAUDE.md");
+        let mut claude_md = String::new();
+        claude_md.push_str("# sandboxed.sh Workspace\n\n");
+
+        match workspace_type {
+            WorkspaceType::Container => {
+                claude_md.push_str(
+                    "This is an **isolated container workspace** managed by sandboxed.sh.\n\n",
+                );
+                claude_md.push_str("- Shell commands execute inside the container\n");
+                claude_md.push_str("- Use the built-in `Bash` tool for shell commands\n");
+                claude_md.push_str(
+                    "- Skills are available in `.claude/skills/` - use `/help` to list them\n",
+                );
+            }
+            WorkspaceType::Host => {
+                claude_md.push_str("This is a **host workspace** managed by sandboxed.sh.\n\n");
+                claude_md
+                    .push_str("- Use the built-in `Bash` tool to run shell commands directly\n");
+                claude_md.push_str(
+                    "- Skills are available in `.claude/skills/` - use `/help` to list them\n",
+                );
+            }
+        }
+
+        tokio::fs::write(&claude_md_path, claude_md).await?;
+    }
+
+    // Write commands to .claude/commands/ using Claude Code's native custom slash command format
+    if let Some(commands) = command_contents {
+        write_claudecode_commands_to_workspace(workspace_dir, commands).await?;
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn write_codex_config(
+    workspace_dir: &Path,
+    mcp_configs: Vec<McpServerConfig>,
+    workspace_root: &Path,
+    workspace_type: WorkspaceType,
+    workspace_env: &HashMap<String, String>,
+    skill_contents: Option<&[SkillContent]>,
+    shared_network: Option<bool>,
+    profile_base: Option<&str>,
+) -> anyhow::Result<()> {
+    let codex_dir = resolve_codex_dir(workspace_dir, workspace_root, workspace_type, workspace_env);
+    tokio::fs::create_dir_all(&codex_dir).await?;
+
+    tracing::debug!("Ensuring Codex config directory at {}", codex_dir.display());
+
+    // Write MCP config for Codex so tools are available.
+    let config_path = codex_dir.join("config.toml");
+    let file_existing = tokio::fs::read_to_string(&config_path)
+        .await
+        .unwrap_or_default();
+    // Profile is authoritative for non-MCP sections like [otel].
+    // When a profile is selected (Some), use its content even if empty —
+    // this clears stale config from previous missions/profiles.
+    // Only fall back to existing file when no profile system is active (None).
+    let existing = match profile_base {
+        Some(toml) => toml.to_string(),
+        None => file_existing,
+    };
+
+    let mut entries = Vec::new();
+    let mut existing_names = std::collections::HashSet::new();
+    for config in mcp_configs.iter().filter(|c| c.enabled) {
+        existing_names.insert(config.name.clone());
+        if let Some(entry) = codex_entry_from_mcp(
+            config,
+            workspace_dir,
+            workspace_root,
+            workspace_type,
+            workspace_env,
+            shared_network,
+            None,
+        ) {
+            entries.push(entry);
+        }
+    }
+
+    // Provide a filesystem alias for Codex (many prompts/toolchains expect it).
+    if existing_names.contains("workspace") && !existing_names.contains("filesystem") {
+        if let Some(workspace_cfg) = mcp_configs.iter().find(|c| c.name == "workspace") {
+            if let Some(entry) = codex_entry_from_mcp(
+                workspace_cfg,
+                workspace_dir,
+                workspace_root,
+                workspace_type,
+                workspace_env,
+                shared_network,
+                Some("filesystem".to_string()),
+            ) {
+                entries.push(entry);
+            }
+        }
+    }
+
+    let config_payload = update_codex_mcp_config(&existing, &entries);
+    tokio::fs::write(&config_path, config_payload).await?;
+
+    // Write skills to ~/.codex/skills using Codex's native skills format
+    if let Some(skills) = skill_contents {
+        write_codex_skills_to_workspace(&codex_dir, skills).await?;
+    }
+
+    Ok(())
+}
+
+struct CodexMcpEntry {
+    name: String,
+    command: Option<String>,
+    args: Vec<String>,
+    env: HashMap<String, String>,
+    url: Option<String>,
+    headers: HashMap<String, String>,
+}
+
+fn resolve_codex_dir(
+    _workspace_dir: &Path,
+    workspace_root: &Path,
+    workspace_type: WorkspaceType,
+    workspace_env: &HashMap<String, String>,
+) -> PathBuf {
+    let container_fallback = workspace_env
+        .get("SANDBOXED_SH_CONTAINER_FALLBACK")
+        .map(|v| {
+            matches!(
+                v.trim().to_lowercase().as_str(),
+                "1" | "true" | "yes" | "y" | "on"
+            )
+        })
+        .unwrap_or(false);
+
+    if workspace_type == WorkspaceType::Container && !container_fallback {
+        return workspace_root.join("root").join(".codex");
+    }
+
+    PathBuf::from(home_dir()).join(".codex")
+}
+
+fn resolve_claudecode_dir(
+    workspace_root: &Path,
+    workspace_type: WorkspaceType,
+    workspace_env: &HashMap<String, String>,
+) -> PathBuf {
+    let container_fallback = workspace_env
+        .get("SANDBOXED_SH_CONTAINER_FALLBACK")
+        .map(|v| {
+            matches!(
+                v.trim().to_lowercase().as_str(),
+                "1" | "true" | "yes" | "y" | "on"
+            )
+        })
+        .unwrap_or(false);
+
+    if workspace_type == WorkspaceType::Container && !container_fallback {
+        return workspace_root.join("root").join(".claude");
+    }
+
+    PathBuf::from(home_dir()).join(".claude")
+}
+
+fn codex_entry_from_mcp(
+    config: &McpServerConfig,
+    workspace_dir: &Path,
+    workspace_root: &Path,
+    workspace_type: WorkspaceType,
+    workspace_env: &HashMap<String, String>,
+    shared_network: Option<bool>,
+    override_name: Option<String>,
+) -> Option<CodexMcpEntry> {
+    let raw_name = override_name.unwrap_or_else(|| config.name.clone());
+    let sanitized = sanitize_key(&raw_name);
+    let name = if sanitized.is_empty() {
+        "mcp".to_string()
+    } else {
+        sanitized
+    };
+    match &config.transport {
+        McpTransport::Http { endpoint, headers } => Some(CodexMcpEntry {
+            name,
+            command: None,
+            args: Vec::new(),
+            env: HashMap::new(),
+            url: Some(endpoint.clone()),
+            headers: headers.clone(),
+        }),
+        McpTransport::Stdio { .. } => {
+            let opencode_entry = opencode_entry_from_mcp(
+                config,
+                workspace_dir,
+                workspace_root,
+                workspace_type,
+                workspace_env,
+                shared_network,
+            );
+            let command_vec = opencode_entry
+                .get("command")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let command = command_vec
+                .first()
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let args: Vec<String> = command_vec
+                .iter()
+                .skip(1)
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+
+            let env = opencode_entry
+                .get("environment")
+                .and_then(|v| v.as_object())
+                .map(|obj| {
+                    obj.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                        .collect::<HashMap<String, String>>()
+                })
+                .unwrap_or_default();
+
+            command.map(|cmd| CodexMcpEntry {
+                name,
+                command: Some(cmd),
+                args,
+                env,
+                url: None,
+                headers: HashMap::new(),
+            })
+        }
+    }
+}
+
+fn update_codex_mcp_config(existing: &str, entries: &[CodexMcpEntry]) -> String {
+    let mut names = std::collections::HashSet::new();
+    for entry in entries {
+        names.insert(entry.name.clone());
+    }
+
+    let mut filtered: Vec<String> = Vec::new();
+    let mut skip = false;
+    for line in existing.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            if let Some(section_name) = parse_mcp_section_name(line) {
+                if names.contains(&section_name) {
+                    skip = true;
+                    continue;
+                }
+                skip = false;
+                filtered.push(line.to_string());
+                continue;
+            }
+            // Non-MCP section: stop skipping and keep section header.
+            skip = false;
+            filtered.push(line.to_string());
+            continue;
+        }
+        if skip {
+            continue;
+        }
+        filtered.push(line.to_string());
+    }
+
+    let mut output = filtered.join("\n");
+    if !output.is_empty() {
+        output.push('\n');
+    }
+    if !output.is_empty() && !output.ends_with("\n\n") {
+        output.push('\n');
+    }
+
+    for entry in entries {
+        output.push_str(&render_codex_mcp_entry(entry));
+        output.push('\n');
+    }
+
+    output
+}
+
+fn parse_mcp_section_name(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
+        return None;
+    }
+    let inner = trimmed.trim_start_matches('[').trim_end_matches(']');
+    let prefix = "mcp_servers.";
+    if !inner.starts_with(prefix) {
+        return None;
+    }
+    let rest = &inner[prefix.len()..];
+    let base = rest.split('.').next()?;
+    Some(sanitize_key(base))
+}
+
+fn render_codex_mcp_entry(entry: &CodexMcpEntry) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("[mcp_servers.{}]\n", entry.name));
+
+    if let Some(url) = &entry.url {
+        out.push_str(&format!("url = {}\n", toml_string(url)));
+        if !entry.headers.is_empty() {
+            out.push('\n');
+            out.push_str(&format!("[mcp_servers.{}.headers]\n", entry.name));
+            let mut headers = entry.headers.iter().collect::<Vec<_>>();
+            headers.sort_by(|a, b| a.0.cmp(b.0));
+            for (key, value) in headers {
+                out.push_str(&format!("{} = {}\n", toml_key(key), toml_string(value)));
+            }
+        }
+        return out;
+    }
+
+    if let Some(command) = &entry.command {
+        out.push_str(&format!("command = {}\n", toml_string(command)));
+        if !entry.args.is_empty() {
+            let args = entry
+                .args
+                .iter()
+                .map(|arg| toml_string(arg))
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push_str(&format!("args = [{}]\n", args));
+        }
+        if !entry.env.is_empty() {
+            out.push('\n');
+            out.push_str(&format!("[mcp_servers.{}.env]\n", entry.name));
+            let mut envs = entry.env.iter().collect::<Vec<_>>();
+            envs.sort_by(|a, b| a.0.cmp(b.0));
+            for (key, value) in envs {
+                out.push_str(&format!("{} = {}\n", toml_key(key), toml_string(value)));
+            }
+        }
+    }
+
+    out
+}
+
+fn toml_string(value: &str) -> String {
+    let mut out = String::from("\"");
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn toml_key(key: &str) -> String {
+    if key
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return key.to_string();
+    }
+    toml_string(key)
+}
+
+/// Write backend-specific configuration to the workspace.
+/// This is the main entry point for config generation.
+#[allow(clippy::too_many_arguments)]
+pub async fn write_backend_config(
+    workspace_dir: &Path,
+    backend_id: &str,
+    mcp_configs: Vec<McpServerConfig>,
+    workspace_root: &Path,
+    workspace_type: WorkspaceType,
+    workspace_env: &HashMap<String, String>,
+    skill_allowlist: Option<&[String]>,
+    skill_contents: Option<&[SkillContent]>,
+    command_contents: Option<&[CommandContent]>,
+    shared_network: Option<bool>,
+    custom_providers: Option<&[AIProvider]>,
+    claudecode_profile_overlay: Option<&serde_json::Value>,
+    codex_profile_base: Option<&str>,
+) -> anyhow::Result<()> {
+    match backend_id {
+        "opencode" => {
+            write_opencode_config(
+                workspace_dir,
+                mcp_configs,
+                workspace_root,
+                workspace_type,
+                workspace_env,
+                skill_allowlist,
+                command_contents,
+                shared_network,
+                custom_providers,
+            )
+            .await
+        }
+        "claudecode" => {
+            // Keep OpenCode config in sync for compatibility with existing execution pipeline.
+            write_opencode_config(
+                workspace_dir,
+                mcp_configs.clone(),
+                workspace_root,
+                workspace_type,
+                workspace_env,
+                skill_allowlist,
+                command_contents,
+                shared_network,
+                custom_providers,
+            )
+            .await?;
+            write_claudecode_config(
+                workspace_dir,
+                mcp_configs,
+                workspace_root,
+                workspace_type,
+                workspace_env,
+                skill_contents,
+                command_contents,
+                shared_network,
+                claudecode_profile_overlay,
+            )
+            .await
+        }
+        "codex" => {
+            write_codex_config(
+                workspace_dir,
+                mcp_configs,
+                workspace_root,
+                workspace_type,
+                workspace_env,
+                skill_contents,
+                shared_network,
+                codex_profile_base,
+            )
+            .await
+        }
+        "gemini" | "grok" => {
+            // These CLIs don't need a Sandboxed.sh-specific config format; use
+            // OpenCode config for workspace setup (skills, commands, etc.).
+            write_opencode_config(
+                workspace_dir,
+                mcp_configs,
+                workspace_root,
+                workspace_type,
+                workspace_env,
+                skill_allowlist,
+                command_contents,
+                shared_network,
+                custom_providers,
+            )
+            .await
+        }
+        _ => {
+            // Unknown backend - write OpenCode config as fallback
+            tracing::warn!(
+                backend = backend_id,
+                "Unknown backend, falling back to OpenCode config"
+            );
+            write_opencode_config(
+                workspace_dir,
+                mcp_configs,
+                workspace_root,
+                workspace_type,
+                workspace_env,
+                skill_allowlist,
+                command_contents,
+                shared_network,
+                custom_providers,
+            )
+            .await
+        }
+    }
+}
+
+/// Skill content to be written to the workspace.
+pub struct SkillContent {
+    /// Skill name (folder name)
+    pub name: String,
+    /// Description from SKILL.md frontmatter (for Claude Code auto-discovery)
+    pub description: Option<String>,
+    /// Primary SKILL.md content
+    pub content: String,
+    /// Additional markdown files (relative path, content)
+    /// Path preserves subdirectory structure (e.g., "references/guide.md")
+    pub files: Vec<(String, String)>,
+}
+
+/// Command content to be written to the workspace.
+/// For Claude Code: written to `.claude/commands/<name>.md`
+/// For OpenCode: written as a skill to `.opencode/skill/<name>/SKILL.md`
+pub struct CommandContent {
+    /// Command name (filename without .md)
+    pub name: String,
+    /// Description from frontmatter
+    pub description: Option<String>,
+    /// Full markdown content
+    pub content: String,
+}
+
+/// Ensure the skill content has a `name` field in the YAML frontmatter.
+/// OpenCode requires `name` field for skill discovery.
+fn ensure_skill_name_in_frontmatter(content: &str, skill_name: &str) -> String {
+    // Check if the content starts with YAML frontmatter
+    if !content.starts_with("---") {
+        // No frontmatter, add it with name field
+        return format!("---\nname: {}\n---\n{}", skill_name, content);
+    }
+
+    // Find the end of frontmatter
+    if let Some(end_idx) = content[3..].find("---") {
+        let frontmatter = &content[3..3 + end_idx];
+        let rest = &content[3 + end_idx..];
+
+        // Check if name field already exists
+        let has_name = frontmatter.lines().any(|line| {
+            let trimmed = line.trim();
+            trimmed.starts_with("name:") || trimmed.starts_with("name :")
+        });
+
+        if has_name {
+            // Name already present, return as-is
+            return content.to_string();
+        }
+
+        // Insert name field after the opening ---
+        // Ensure there's a newline before the closing ---
+        return format!(
+            "---\nname: {}\n{}\n{}",
+            skill_name,
+            frontmatter.trim(),
+            rest.trim_start_matches('\n')
+        );
+    }
+
+    // Malformed frontmatter, return as-is
+    content.to_string()
+}
+
+/// Write skill files to the workspace's `.opencode/skill/` directory.
+/// This makes skills available to OpenCode when running in this workspace.
+/// OpenCode looks for skills in `.opencode/{skill,skills}/**/SKILL.md`
+///
+/// Note: `<encrypted>` tags are stripped from content before writing,
+/// leaving only the plaintext values for the agent to use.
+pub async fn write_skills_to_workspace(
+    workspace_dir: &Path,
+    skills: &[SkillContent],
+) -> anyhow::Result<()> {
+    if skills.is_empty() {
+        return Ok(());
+    }
+
+    let skills_dir = workspace_dir.join(".opencode").join("skill");
+    tokio::fs::create_dir_all(&skills_dir).await?;
+
+    for skill in skills {
+        let skill_dir = skills_dir.join(&skill.name);
+        tokio::fs::create_dir_all(&skill_dir).await?;
+
+        // Ensure skill content has required `name` field in frontmatter
+        let content_with_name = ensure_skill_name_in_frontmatter(&skill.content, &skill.name);
+
+        // Strip <encrypted> tags - deployed skills should have bare plaintext values
+        let content_for_workspace = strip_encrypted_tags(&content_with_name);
+
+        // Write SKILL.md
+        let skill_md_path = skill_dir.join("SKILL.md");
+        tokio::fs::write(&skill_md_path, &content_for_workspace).await?;
+
+        // Write additional files (preserving subdirectory structure)
+        for (relative_path, file_content) in &skill.files {
+            let file_path = skill_dir.join(relative_path);
+            // Create parent directories if needed (e.g., "references/guide.md")
+            if let Some(parent) = file_path.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            // Also strip encrypted tags from additional files
+            let file_content_stripped = strip_encrypted_tags(file_content);
+            tokio::fs::write(&file_path, file_content_stripped).await?;
+        }
+
+        tracing::debug!(
+            skill = %skill.name,
+            workspace = %workspace_dir.display(),
+            "Wrote skill to workspace"
+        );
+    }
+
+    tracing::info!(
+        count = skills.len(),
+        workspace = %workspace_dir.display(),
+        "Wrote skills to workspace"
+    );
+
+    Ok(())
+}
+
+/// Write skill files to the workspace's `.claude/skills/` directory.
+/// This makes skills available to Claude Code using its native skills format.
+/// Claude Code looks for skills in `.claude/skills/<name>/SKILL.md`
+///
+/// Note: `<encrypted>` tags are stripped from content before writing,
+/// leaving only the plaintext values for the agent to use.
+pub async fn write_claudecode_skills_to_workspace(
+    workspace_dir: &Path,
+    skills: &[SkillContent],
+) -> anyhow::Result<()> {
+    let skills_dir = workspace_dir.join(".claude").join("skills");
+
+    tracing::debug!(
+        workspace = %workspace_dir.display(),
+        skills_dir = %skills_dir.display(),
+        skill_count = skills.len(),
+        skill_names = ?skills.iter().map(|s| &s.name).collect::<Vec<_>>(),
+        "Writing Claude Code skills to workspace"
+    );
+
+    // Clean up old skills directory to remove stale skills
+    if skills_dir.exists() {
+        let _ = tokio::fs::remove_dir_all(&skills_dir).await;
+    }
+
+    if skills.is_empty() {
+        tracing::warn!(
+            workspace = %workspace_dir.display(),
+            "No skills to write for Claude Code"
+        );
+        return Ok(());
+    }
+
+    tokio::fs::create_dir_all(&skills_dir).await?;
+
+    for skill in skills {
+        let skill_dir = skills_dir.join(&skill.name);
+        tokio::fs::create_dir_all(&skill_dir).await?;
+
+        // Ensure skill content has required frontmatter fields for Claude Code
+        let content_with_frontmatter = ensure_claudecode_skill_frontmatter(
+            &skill.content,
+            &skill.name,
+            skill.description.as_deref(),
+        );
+
+        // Strip <encrypted> tags - deployed skills should have bare plaintext values
+        let content_for_workspace = strip_encrypted_tags(&content_with_frontmatter);
+
+        // Write SKILL.md
+        let skill_md_path = skill_dir.join("SKILL.md");
+        tokio::fs::write(&skill_md_path, &content_for_workspace).await?;
+
+        // Write additional files (preserving subdirectory structure)
+        for (relative_path, file_content) in &skill.files {
+            let file_path = skill_dir.join(relative_path);
+            // Create parent directories if needed (e.g., "references/guide.md")
+            if let Some(parent) = file_path.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            // Also strip encrypted tags from additional files
+            let file_content_stripped = strip_encrypted_tags(file_content);
+            tokio::fs::write(&file_path, file_content_stripped).await?;
+        }
+
+        tracing::debug!(
+            skill = %skill.name,
+            workspace = %workspace_dir.display(),
+            "Wrote Claude Code skill to workspace"
+        );
+    }
+
+    tracing::info!(
+        count = skills.len(),
+        workspace = %workspace_dir.display(),
+        "Wrote Claude Code skills to workspace"
+    );
+
+    Ok(())
+}
+
+/// Write skill files to Codex's native skills directory.
+/// Codex looks for skills in `<codex_root>/skills/<name>/SKILL.md`.
+pub async fn write_codex_skills_to_workspace(
+    codex_root: &Path,
+    skills: &[SkillContent],
+) -> anyhow::Result<()> {
+    let skills_dir = codex_root.join("skills");
+
+    tracing::debug!(
+        codex_root = %codex_root.display(),
+        skills_dir = %skills_dir.display(),
+        skill_count = skills.len(),
+        skill_names = ?skills.iter().map(|s| &s.name).collect::<Vec<_>>(),
+        "Writing Codex skills"
+    );
+
+    // Clean up old skills directory to remove stale skills
+    if skills_dir.exists() {
+        let _ = tokio::fs::remove_dir_all(&skills_dir).await;
+    }
+
+    if skills.is_empty() {
+        tracing::warn!(codex_root = %codex_root.display(), "No skills to write for Codex");
+        return Ok(());
+    }
+
+    tokio::fs::create_dir_all(&skills_dir).await?;
+
+    for skill in skills {
+        let skill_dir = skills_dir.join(&skill.name);
+        tokio::fs::create_dir_all(&skill_dir).await?;
+
+        // Ensure skill content has required frontmatter fields for Codex
+        let content_with_frontmatter = ensure_claudecode_skill_frontmatter(
+            &skill.content,
+            &skill.name,
+            skill.description.as_deref(),
+        );
+
+        // Strip <encrypted> tags - deployed skills should have bare plaintext values
+        let content_for_workspace = strip_encrypted_tags(&content_with_frontmatter);
+
+        // Write SKILL.md
+        let skill_md_path = skill_dir.join("SKILL.md");
+        tokio::fs::write(&skill_md_path, &content_for_workspace).await?;
+
+        // Write additional files (preserving subdirectory structure)
+        for (relative_path, file_content) in &skill.files {
+            let file_path = skill_dir.join(relative_path);
+            if let Some(parent) = file_path.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            let file_content_stripped = strip_encrypted_tags(file_content);
+            tokio::fs::write(&file_path, file_content_stripped).await?;
+        }
+
+        tracing::debug!(skill = %skill.name, codex_root = %codex_root.display(), "Wrote Codex skill");
+    }
+
+    tracing::info!(
+        count = skills.len(),
+        codex_root = %codex_root.display(),
+        "Wrote Codex skills"
+    );
+
+    Ok(())
+}
+
+/// Write command files to the workspace's `.claude/commands/` directory.
+/// Claude Code custom slash commands are simple markdown files at `.claude/commands/<name>.md`.
+pub async fn write_claudecode_commands_to_workspace(
+    workspace_dir: &Path,
+    commands: &[CommandContent],
+) -> anyhow::Result<()> {
+    let commands_dir = workspace_dir.join(".claude").join("commands");
+
+    tracing::debug!(
+        workspace = %workspace_dir.display(),
+        commands_dir = %commands_dir.display(),
+        command_count = commands.len(),
+        command_names = ?commands.iter().map(|c| &c.name).collect::<Vec<_>>(),
+        "Writing Claude Code commands to workspace"
+    );
+
+    // Clean up old commands directory to remove stale commands
+    if commands_dir.exists() {
+        let _ = tokio::fs::remove_dir_all(&commands_dir).await;
+    }
+
+    if commands.is_empty() {
+        tracing::debug!(
+            workspace = %workspace_dir.display(),
+            "No commands to write for Claude Code"
+        );
+        return Ok(());
+    }
+
+    tokio::fs::create_dir_all(&commands_dir).await?;
+
+    for command in commands {
+        // Claude Code commands are just markdown files, not directories
+        let command_path = commands_dir.join(format!("{}.md", command.name));
+        tokio::fs::write(&command_path, &command.content).await?;
+
+        tracing::debug!(
+            command = %command.name,
+            workspace = %workspace_dir.display(),
+            "Wrote Claude Code command to workspace"
+        );
+    }
+
+    tracing::info!(
+        count = commands.len(),
+        workspace = %workspace_dir.display(),
+        "Wrote Claude Code commands to workspace"
+    );
+
+    Ok(())
+}
+
+/// Write commands as skills to the workspace's `.opencode/skill/` directory.
+/// For OpenCode, commands are treated as skills since OpenCode doesn't have a separate command system.
+pub async fn write_commands_as_opencode_skills(
+    workspace_dir: &Path,
+    commands: &[CommandContent],
+) -> anyhow::Result<()> {
+    if commands.is_empty() {
+        return Ok(());
+    }
+
+    let skills_dir = workspace_dir.join(".opencode").join("skill");
+    tokio::fs::create_dir_all(&skills_dir).await?;
+
+    for command in commands {
+        let skill_dir = skills_dir.join(&command.name);
+        tokio::fs::create_dir_all(&skill_dir).await?;
+
+        // Convert command to skill format with proper frontmatter
+        let skill_content = convert_command_to_skill_content(&command.content, &command.name);
+
+        let skill_md_path = skill_dir.join("SKILL.md");
+        tokio::fs::write(&skill_md_path, &skill_content).await?;
+
+        tracing::debug!(
+            command = %command.name,
+            workspace = %workspace_dir.display(),
+            "Wrote command as OpenCode skill"
+        );
+    }
+
+    tracing::info!(
+        count = commands.len(),
+        workspace = %workspace_dir.display(),
+        "Wrote commands as OpenCode skills"
+    );
+
+    Ok(())
+}
+
+/// Convert command content to skill format by ensuring proper frontmatter.
+fn convert_command_to_skill_content(content: &str, name: &str) -> String {
+    // Check if the content starts with YAML frontmatter
+    if !content.starts_with("---") {
+        // No frontmatter, add it with name field
+        return format!("---\nname: {}\n---\n{}", name, content);
+    }
+
+    // Find the end of frontmatter
+    if let Some(end_idx) = content[3..].find("---") {
+        let frontmatter = &content[3..3 + end_idx];
+        let rest = &content[3 + end_idx..];
+
+        // Check if name field already exists
+        let has_name = frontmatter.lines().any(|line| {
+            let trimmed = line.trim();
+            trimmed.starts_with("name:") || trimmed.starts_with("name :")
+        });
+
+        if has_name {
+            return content.to_string();
+        }
+
+        // Add name field
+        return format!("---\nname: {}\n{}---{}", name, frontmatter, rest);
+    }
+
+    content.to_string()
+}
+
+/// Format a YAML description value, quoting if it contains special chars.
+fn format_yaml_description(desc: &str) -> String {
+    let clean = desc.replace('\n', " ");
+    // Quote if it contains colons, brackets, or other YAML special characters
+    if clean.contains(':')
+        || clean.contains('[')
+        || clean.contains(']')
+        || clean.contains('{')
+        || clean.contains('}')
+        || clean.contains('#')
+        || clean.contains('&')
+        || clean.contains('*')
+        || clean.contains('!')
+        || clean.contains('|')
+        || clean.contains('>')
+        || clean.contains('\'')
+        || clean.contains('"')
+        || clean.contains('%')
+        || clean.contains('@')
+        || clean.contains('`')
+    {
+        // Escape any double quotes in the description and wrap in quotes
+        format!("\"{}\"", clean.replace('\\', "\\\\").replace('"', "\\\""))
+    } else {
+        clean
+    }
+}
+
+/// Ensure the skill content has proper YAML frontmatter for Claude Code.
+/// Claude Code requires `name` and benefits from `description` for auto-discovery.
+/// Also fixes invalid YAML descriptions that contain colons without quotes.
+fn ensure_claudecode_skill_frontmatter(
+    content: &str,
+    skill_name: &str,
+    description: Option<&str>,
+) -> String {
+    // Check if the content starts with YAML frontmatter
+    if !content.starts_with("---") {
+        // No frontmatter, add it with name and description
+        let desc_line = description
+            .map(|d| format!("description: {}\n", format_yaml_description(d)))
+            .unwrap_or_default();
+        return format!("---\nname: {}\n{}---\n{}", skill_name, desc_line, content);
+    }
+
+    // Find the end of frontmatter
+    if let Some(end_idx) = content[3..].find("---") {
+        let frontmatter = &content[3..3 + end_idx];
+        let rest = &content[3 + end_idx..];
+
+        // Check if name field already exists
+        let has_name = frontmatter.lines().any(|line| {
+            let trimmed = line.trim();
+            trimmed.starts_with("name:") || trimmed.starts_with("name :")
+        });
+
+        // Check if description needs fixing (unquoted with special chars)
+        let needs_description_fix = frontmatter.lines().any(|line| {
+            let trimmed = line.trim();
+            if trimmed.starts_with("description:") {
+                // Get the description value after "description:"
+                let value = trimmed.strip_prefix("description:").unwrap_or("").trim();
+                // If it starts with a quote or '>' or '|', it's already properly formatted
+                if value.starts_with('"')
+                    || value.starts_with('\'')
+                    || value.starts_with('>')
+                    || value.starts_with('|')
+                {
+                    return false;
+                }
+                // Check if it contains YAML special characters that need quoting
+                value.contains(':')
+                    || value.contains('[')
+                    || value.contains(']')
+                    || value.contains('{')
+                    || value.contains('}')
+            } else {
+                false
+            }
+        });
+
+        // Check if description field already exists
+        let has_description = frontmatter.lines().any(|line| {
+            let trimmed = line.trim();
+            trimmed.starts_with("description:") || trimmed.starts_with("description :")
+        });
+
+        if has_name && (has_description || description.is_none()) && !needs_description_fix {
+            // All required fields present and valid, return as-is
+            return content.to_string();
+        }
+
+        // Build updated frontmatter, fixing any invalid descriptions
+        let mut new_frontmatter = String::new();
+        if !has_name {
+            new_frontmatter.push_str(&format!("name: {}\n", skill_name));
+        }
+        if !has_description {
+            if let Some(desc) = description {
+                new_frontmatter
+                    .push_str(&format!("description: {}\n", format_yaml_description(desc)));
+            }
+        }
+
+        // Process existing frontmatter lines, fixing descriptions if needed
+        for line in frontmatter.lines() {
+            let trimmed = line.trim();
+            if needs_description_fix && trimmed.starts_with("description:") {
+                // Fix the description line
+                let value = trimmed.strip_prefix("description:").unwrap_or("").trim();
+                new_frontmatter.push_str(&format!(
+                    "description: {}\n",
+                    format_yaml_description(value)
+                ));
+            } else if !trimmed.is_empty() {
+                new_frontmatter.push_str(line);
+                new_frontmatter.push('\n');
+            }
+        }
+
+        return format!(
+            "---\n{}\n{}",
+            new_frontmatter.trim_end(),
+            rest.trim_start_matches('\n')
+        );
+    }
+
+    // Malformed frontmatter, return as-is
+    content.to_string()
+}
+
+async fn resolve_workspace_skill_names(
+    workspace: &Workspace,
+    library: &LibraryStore,
+) -> anyhow::Result<Vec<String>> {
+    if !workspace.skills.is_empty() {
+        return Ok(workspace.skills.clone());
+    }
+
+    // Default host workspace should expose all library skills when none are explicitly configured.
+    if workspace.id == DEFAULT_WORKSPACE_ID && workspace.workspace_type == WorkspaceType::Host {
+        let skills = library.list_skills().await?;
+        let names: Vec<String> = skills.into_iter().map(|skill| skill.name).collect();
+        tracing::debug!(
+            workspace = %workspace.name,
+            count = names.len(),
+            "Using all library skills for default host workspace"
+        );
+        return Ok(names);
+    }
+
+    Ok(Vec::new())
+}
+
+/// Sync skills from library to workspace's `.opencode/skill/` directory.
+/// Called when workspace is created, updated, or before mission execution.
+pub async fn sync_workspace_skills(
+    workspace: &Workspace,
+    library: &LibraryStore,
+) -> anyhow::Result<()> {
+    let skill_names = resolve_workspace_skill_names(workspace, library).await?;
+    sync_skills_to_dir(&workspace.path, &skill_names, &workspace.name, library).await
+}
+
+/// Sync skills from library to a specific directory's `.opencode/skill/` folder.
+/// Used for syncing skills to mission directories.
+/// This performs a full sync: adds new skills and removes skills no longer in the allowlist.
+pub async fn sync_skills_to_dir(
+    target_dir: &Path,
+    skill_names: &[String],
+    context_name: &str,
+    library: &LibraryStore,
+) -> anyhow::Result<()> {
+    let skills_dir = target_dir.join(".opencode").join("skill");
+
+    // Clean up skills that are no longer in the allowlist
+    if skills_dir.exists() {
+        let allowed: std::collections::HashSet<&str> =
+            skill_names.iter().map(|s| s.as_str()).collect();
+
+        if let Ok(mut entries) = tokio::fs::read_dir(&skills_dir).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let path = entry.path();
+                if path.is_dir() {
+                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                        if !allowed.contains(name) {
+                            tracing::info!(
+                                skill = %name,
+                                context = %context_name,
+                                "Removing skill no longer in allowlist"
+                            );
+                            let _ = tokio::fs::remove_dir_all(&path).await;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if skill_names.is_empty() {
+        tracing::debug!(
+            context = %context_name,
+            "No skills to sync"
+        );
+        return Ok(());
+    }
+
+    let skills_to_write = collect_skill_contents(skill_names, context_name, library).await;
+
+    write_skills_to_workspace(target_dir, &skills_to_write).await?;
+
+    tracing::info!(
+        context = %context_name,
+        skills = ?skill_names,
+        target = %target_dir.display(),
+        "Synced skills to directory"
+    );
+
+    Ok(())
+}
+
+async fn collect_skill_contents(
+    skill_names: &[String],
+    context_name: &str,
+    library: &LibraryStore,
+) -> Vec<SkillContent> {
+    let mut skills_to_write: Vec<SkillContent> = Vec::new();
+
+    for skill_name in skill_names {
+        match library.get_skill(skill_name).await {
+            Ok(skill) => {
+                skills_to_write.push(SkillContent {
+                    name: skill.name,
+                    description: skill.description,
+                    content: skill.content,
+                    // Use f.path to preserve subdirectory structure (e.g., "references/guide.md")
+                    files: skill
+                        .files
+                        .into_iter()
+                        .map(|f| (f.path, f.content))
+                        .collect(),
+                });
+            }
+            Err(e) => {
+                tracing::warn!(
+                    skill = %skill_name,
+                    context = %context_name,
+                    error = %e,
+                    "Failed to load skill from library, skipping"
+                );
+            }
+        }
+    }
+
+    skills_to_write
+}
+
+/// Collect all command contents from the library.
+/// Used for both Claude Code (as commands) and OpenCode (as skills).
+async fn collect_command_contents(
+    context_name: &str,
+    library: &LibraryStore,
+) -> Vec<CommandContent> {
+    let mut commands_to_write: Vec<CommandContent> = Vec::new();
+
+    match library.list_commands().await {
+        Ok(command_summaries) => {
+            for summary in command_summaries {
+                match library.get_command(&summary.name).await {
+                    Ok(command) => {
+                        commands_to_write.push(CommandContent {
+                            name: command.name,
+                            description: command.description,
+                            content: command.content,
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            command = %summary.name,
+                            context = %context_name,
+                            error = %e,
+                            "Failed to load command from library, skipping"
+                        );
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                context = %context_name,
+                error = %e,
+                "Failed to list commands from library"
+            );
+        }
+    }
+
+    commands_to_write
+}
+
+/// Agent content to be written to the workspace.
+pub struct AgentContent {
+    /// Agent name (filename without .md)
+    pub name: String,
+    /// Full markdown content (frontmatter + body)
+    pub content: String,
+}
+
+/// Write agent files to the workspace's `.opencode/agent/` directory.
+/// This makes library agents available to OpenCode when running in this workspace.
+pub async fn write_agents_to_workspace(
+    workspace_dir: &Path,
+    agents: &[AgentContent],
+) -> anyhow::Result<()> {
+    if agents.is_empty() {
+        return Ok(());
+    }
+
+    let agents_dir = workspace_dir.join(".opencode").join("agent");
+    tokio::fs::create_dir_all(&agents_dir).await?;
+
+    for agent in agents {
+        let agent_path = agents_dir.join(format!("{}.md", agent.name));
+        tokio::fs::write(&agent_path, &agent.content).await?;
+
+        tracing::debug!(
+            agent = %agent.name,
+            workspace = %workspace_dir.display(),
+            "Wrote agent to workspace"
+        );
+    }
+
+    tracing::info!(
+        count = agents.len(),
+        workspace = %workspace_dir.display(),
+        "Wrote agents to workspace"
+    );
+
+    Ok(())
+}
+
+/// Sync library agents to a specific directory's `.opencode/agent/` folder.
+pub async fn sync_agents_to_dir(
+    target_dir: &Path,
+    agent_names: &[String],
+    context_name: &str,
+    library: &LibraryStore,
+) -> anyhow::Result<()> {
+    if agent_names.is_empty() {
+        tracing::debug!(
+            context = %context_name,
+            "No agents to sync"
+        );
+        return Ok(());
+    }
+
+    let mut agents_to_write = Vec::new();
+    for agent_name in agent_names {
+        match library.get_library_agent(agent_name).await {
+            Ok(agent) => {
+                agents_to_write.push(AgentContent {
+                    name: agent.name,
+                    content: agent.content,
+                });
+            }
+            Err(e) => {
+                tracing::warn!(
+                    agent = %agent_name,
+                    context = %context_name,
+                    error = %e,
+                    "Failed to load library agent, skipping"
+                );
+            }
+        }
+    }
+
+    write_agents_to_workspace(target_dir, &agents_to_write).await?;
+
+    tracing::info!(
+        context = %context_name,
+        agents = ?agent_names,
+        target = %target_dir.display(),
+        "Synced agents to directory"
+    );
+
+    Ok(())
+}
+
+async fn prepare_workspace_dir(path: &Path) -> anyhow::Result<PathBuf> {
+    tokio::fs::create_dir_all(path.join("output")).await?;
+    tokio::fs::create_dir_all(path.join("temp")).await?;
+    Ok(path.to_path_buf())
+}
+
+/// Filter MCP configs based on a workspace's MCP allowlist.
+///
+/// - Empty `workspace_mcps` → include only MCPs with `default_enabled = true`
+///   (`replace_defaults` is ignored in this case)
+/// - Non-empty `workspace_mcps` + `replace_defaults = true` → **only** the allowlist
+/// - Non-empty `workspace_mcps` + `replace_defaults = false` → allowlist **plus** `default_enabled` MCPs
+///
+/// In all cases, globally disabled MCPs (`enabled = false`) are excluded.
+fn filter_mcp_configs_for_workspace(
+    configs: Vec<McpServerConfig>,
+    workspace_mcps: &[String],
+    replace_defaults: bool,
+) -> Vec<McpServerConfig> {
+    configs
+        .into_iter()
+        .filter(|c| {
+            // Globally disabled MCPs are always excluded
+            if !c.enabled {
+                return false;
+            }
+            if workspace_mcps.is_empty() {
+                // No explicit list → fall back to default MCPs
+                c.default_enabled
+            } else {
+                let in_list = workspace_mcps.iter().any(|name| name == &c.name);
+                if replace_defaults {
+                    // Explicit list is the complete set — only listed MCPs
+                    in_list
+                } else {
+                    // Additive mode — listed MCPs + all default-enabled MCPs
+                    in_list || c.default_enabled
+                }
+            }
+        })
+        .collect()
+}
+
+/// Prepare a custom workspace directory and write `opencode.json`.
+pub async fn prepare_custom_workspace(
+    _config: &Config,
+    mcp: &McpRegistry,
+    workspace_dir: PathBuf,
+) -> anyhow::Result<PathBuf> {
+    prepare_workspace_dir(&workspace_dir).await?;
+    let mcp_configs = mcp.list_configs().await;
+    let workspace_env = HashMap::new();
+    write_opencode_config(
+        &workspace_dir,
+        mcp_configs,
+        &workspace_dir,
+        WorkspaceType::Host,
+        &workspace_env,
+        None,
+        None, // No command_contents for simple workspace preparation
+        None, // shared_network: not relevant for host workspaces
+        None, // custom_providers: none for simple workspace preparation
+    )
+    .await?;
+    Ok(workspace_dir)
+}
+
+/// Prepare the workspace directory for a mission and write `opencode.json`.
+pub async fn prepare_mission_workspace(
+    config: &Config,
+    mcp: &McpRegistry,
+    mission_id: Uuid,
+) -> anyhow::Result<PathBuf> {
+    let default_workspace = Workspace::default_host(config.working_dir.clone());
+    prepare_mission_workspace_in(&default_workspace, mcp, mission_id).await
+}
+
+/// Prepare a workspace directory for a mission under a specific workspace root.
+/// Missions share the workspace root directory (no per-mission isolation).
+pub async fn prepare_mission_workspace_in(
+    workspace: &Workspace,
+    mcp: &McpRegistry,
+    mission_id: Uuid,
+) -> anyhow::Result<PathBuf> {
+    // Use a mission-specific directory under the workspace root so multiple missions
+    // can run concurrently without clobbering per-workspace config files.
+    let dir = mission_workspace_dir_for_root(&workspace.path, mission_id);
+    prepare_workspace_dir(&dir).await?;
+    let mcp_configs = filter_mcp_configs_for_workspace(
+        mcp.list_configs().await,
+        &workspace.mcps,
+        workspace.mcps_replace_defaults,
+    );
+    let skill_allowlist = if workspace.skills.is_empty() {
+        None
+    } else {
+        Some(workspace.skills.as_slice())
+    };
+    write_opencode_config(
+        &dir,
+        mcp_configs,
+        &workspace.path,
+        workspace.workspace_type,
+        &workspace.env_vars,
+        skill_allowlist,
+        None, // No command_contents for simple workspace preparation
+        workspace.shared_network,
+        None, // custom_providers: none for simple workspace preparation
+    )
+    .await?;
+    Ok(dir)
+}
+
+/// Prepare a workspace directory for a mission with skill and tool syncing.
+/// This version syncs skills and tools from the workspace to the mission directory.
+pub async fn prepare_mission_workspace_with_skills(
+    workspace: &Workspace,
+    mcp: &McpRegistry,
+    library: Option<&LibraryStore>,
+    mission_id: Uuid,
+) -> anyhow::Result<PathBuf> {
+    prepare_mission_workspace_with_skills_backend(
+        workspace, mcp, library, mission_id, "opencode", None, None, None,
+    )
+    .await
+}
+
+/// Read custom providers from the ai_providers.json file.
+fn read_custom_providers_from_file(workspace_root: &Path) -> Vec<AIProvider> {
+    // Try both possible locations for ai_providers.json
+    let candidates = [
+        workspace_root.join(AI_PROVIDERS_PATH),
+        std::path::PathBuf::from(home_dir()).join(AI_PROVIDERS_PATH),
+    ];
+
+    for path in &candidates {
+        if let Ok(contents) = std::fs::read_to_string(path) {
+            match serde_json::from_str::<Vec<AIProvider>>(&contents) {
+                Ok(providers) => {
+                    let custom: Vec<AIProvider> = providers
+                        .into_iter()
+                        .filter(|p| p.provider_type == ProviderType::Custom && p.enabled)
+                        .collect();
+                    if !custom.is_empty() {
+                        tracing::debug!(
+                            path = %path.display(),
+                            count = custom.len(),
+                            "Loaded custom providers from file"
+                        );
+                        return custom;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %e,
+                        "Failed to parse custom providers file; skipping"
+                    );
+                }
+            }
+        }
+    }
+
+    Vec::new()
+}
+
+/// Prepare a workspace directory for a mission with skill and tool syncing for a specific backend.
+///
+/// `boss_user_id` is the API user that owns this (boss) mission. When set, it
+/// is injected into the orchestrator MCP environment as `BOSS_USER_ID` so the
+/// MCP mints a service JWT scoped to that user — putting any worker missions
+/// it creates into the same per-user mission store as the boss instead of the
+/// MCP's own implicit `orchestrator-mcp` store.
+#[allow(clippy::too_many_arguments)]
+pub async fn prepare_mission_workspace_with_skills_backend(
+    workspace: &Workspace,
+    mcp: &McpRegistry,
+    library: Option<&LibraryStore>,
+    mission_id: Uuid,
+    backend_id: &str,
+    custom_providers: Option<&[AIProvider]>,
+    config_profile: Option<&str>,
+    boss_user_id: Option<&str>,
+) -> anyhow::Result<PathBuf> {
+    // Mission workspace directory lives under the selected workspace root.
+    // This keeps filesystem and config effects scoped to the mission.
+    let dir = mission_workspace_dir_for_root(&workspace.path, mission_id);
+    prepare_workspace_dir(&dir).await?;
+
+    // Get custom providers: use provided list or read from file
+    let providers_from_file;
+    let effective_custom_providers = if let Some(providers) = custom_providers {
+        Some(providers)
+    } else {
+        providers_from_file = read_custom_providers_from_file(&workspace.path);
+        if providers_from_file.is_empty() {
+            None
+        } else {
+            Some(providers_from_file.as_slice())
+        }
+    };
+    let mcp_configs = filter_mcp_configs_for_workspace(
+        mcp.list_configs().await,
+        &workspace.mcps,
+        workspace.mcps_replace_defaults,
+    );
+    let skill_allowlist = if workspace.skills.is_empty() {
+        None
+    } else {
+        Some(workspace.skills.as_slice())
+    };
+    let mut skill_contents: Option<Vec<SkillContent>> = None;
+    let mut command_contents: Option<Vec<CommandContent>> = None;
+
+    if let Some(lib) = library {
+        let context = format!("mission-{}", mission_id);
+
+        // Collect commands from library (for all backends)
+        let commands = collect_command_contents(&context, lib).await;
+        if !commands.is_empty() {
+            tracing::info!(
+                mission_id = %mission_id,
+                backend_id = %backend_id,
+                workspace = %workspace.name,
+                command_count = commands.len(),
+                command_names = ?commands.iter().map(|c| &c.name).collect::<Vec<_>>(),
+                "Collected {} commands for {} backend",
+                commands.len(),
+                backend_id
+            );
+            command_contents = Some(commands);
+        }
+
+        // Collect skills (for backends that use skill contents directly)
+        if matches!(backend_id, "claudecode" | "codex" | "gemini" | "grok") {
+            let skill_names = match resolve_workspace_skill_names(workspace, lib).await {
+                Ok(names) => {
+                    tracing::debug!(
+                        mission_id = %mission_id,
+                        backend_id = %backend_id,
+                        workspace = %workspace.name,
+                        skill_count = names.len(),
+                        skills = ?names,
+                        "Resolved skill names for mission"
+                    );
+                    names
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        mission_id = %mission_id,
+                        backend_id = %backend_id,
+                        workspace = %workspace.name,
+                        error = %e,
+                        "Failed to resolve skill names for mission, using empty list"
+                    );
+                    Vec::new()
+                }
+            };
+            let skills = collect_skill_contents(&skill_names, &context, lib).await;
+            tracing::info!(
+                mission_id = %mission_id,
+                backend_id = %backend_id,
+                workspace = %workspace.name,
+                skill_count = skills.len(),
+                skill_names = ?skill_names,
+                "Collected {} skills for {} backend",
+                skills.len(),
+                backend_id
+            );
+            skill_contents = Some(skills);
+        }
+    } else {
+        tracing::warn!(
+            mission_id = %mission_id,
+            backend_id = %backend_id,
+            workspace = %workspace.name,
+            "Library not available, cannot sync skills/commands to mission workspace"
+        );
+    }
+
+    // Load Claude Code config profile settings (hooks, custom defaults).
+    // Profile is base; generated settings (MCPs, permissions, RTK) win on top.
+    let claudecode_profile_overlay: Option<serde_json::Value> = if backend_id == "claudecode" {
+        if let Some(lib) = library {
+            let profile = config_profile.unwrap_or("default");
+            tracing::info!(
+                mission = %mission_id,
+                workspace = %workspace.name,
+                profile = %profile,
+                "Loading Claude Code settings from profile"
+            );
+            match lib.get_claudecode_raw_settings_for_profile(profile).await {
+                Ok(s) if !s.as_object().map(|o| o.is_empty()).unwrap_or(true) => Some(s),
+                Ok(_) => None,
+                Err(e) => {
+                    tracing::warn!(
+                        mission = %mission_id,
+                        workspace = %workspace.name,
+                        profile = %profile,
+                        error = %e,
+                        "Failed to load Claude Code settings from profile, skipping"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Load Codex config profile (TOML with [otel], model defaults, etc.).
+    // Profile TOML becomes the base; MCP sections are regenerated on top.
+    let codex_profile_base: Option<String> = if backend_id == "codex" {
+        if let Some(lib) = library {
+            let profile = config_profile.unwrap_or("default");
+            tracing::info!(
+                mission = %mission_id,
+                workspace = %workspace.name,
+                profile = %profile,
+                "Loading Codex config from profile"
+            );
+            match lib.get_codex_raw_config_for_profile(profile).await {
+                Ok(s) if !s.trim().is_empty() => Some(s),
+                Ok(_) => Some(String::new()),
+                Err(e) => {
+                    tracing::warn!(
+                        mission = %mission_id,
+                        profile = %profile,
+                        error = %e,
+                        "Failed to load Codex config from profile, skipping"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Inject MISSION_ID and API_URL into stdio MCP server env vars,
+    // and JWT_SECRET only into the orchestrator MCP (not third-party MCPs).
+    let mcp_configs: Vec<McpServerConfig> = mcp_configs
+        .into_iter()
+        .map(|mut cfg| {
+            if let McpTransport::Stdio { ref mut env, .. } = cfg.transport {
+                env.entry("MISSION_ID".to_string())
+                    .or_insert_with(|| mission_id.to_string());
+                // Use the server's own address so MCPs can reach the API
+                // (including from inside containers where localhost differs).
+                if let Ok(port) = std::env::var("PORT") {
+                    env.entry("API_URL".to_string())
+                        .or_insert_with(|| format!("http://127.0.0.1:{}", port));
+                }
+                // Forward JWT_SECRET to trusted internal MCPs so they can
+                // mint service tokens.  Other MCPs (including third-party ones)
+                // must not receive this secret.
+                if cfg.name == "orchestrator" || cfg.name == "automation-manager" {
+                    if let Ok(secret) = std::env::var("JWT_SECRET") {
+                        env.entry("JWT_SECRET".to_string()).or_insert(secret);
+                    }
+                }
+                // Tell the orchestrator MCP which user owns the boss
+                // mission so it mints its service JWT as that user. Without
+                // this, worker missions end up in `missions-orchestrator-mcp.db`
+                // and never appear in the boss's `/api/control/missions` list,
+                // breaking the dashboard's worker chips and the WorkerPanel.
+                if cfg.name == "orchestrator" {
+                    if let Some(user_id) = boss_user_id {
+                        env.entry("BOSS_USER_ID".to_string())
+                            .or_insert_with(|| user_id.to_string());
+                    }
+                }
+            }
+            cfg
+        })
+        .collect();
+
+    write_backend_config(
+        &dir,
+        backend_id,
+        mcp_configs,
+        &workspace.path,
+        workspace.workspace_type,
+        &workspace.env_vars,
+        skill_allowlist,
+        skill_contents.as_deref(),
+        command_contents.as_deref(),
+        workspace.shared_network,
+        effective_custom_providers,
+        claudecode_profile_overlay.as_ref(),
+        codex_profile_base.as_deref(),
+    )
+    .await?;
+
+    // Sync native opencode agents from profile into the workspace path read by
+    // vanilla `opencode`.
+    if backend_id == "opencode" {
+        if let Some(lib) = library {
+            let profile = config_profile.unwrap_or("default");
+            let profile_path = lib.config_profile_path(profile);
+            let agents_src = profile_path.join(".opencode").join("agents");
+            if agents_src.is_dir() {
+                let agents_dest = dir.join(".opencode").join("agent");
+                if let Err(e) = tokio::fs::create_dir_all(&agents_dest).await {
+                    tracing::warn!(
+                        mission = %mission_id,
+                        error = %e,
+                        "Failed to create .opencode/agent directory"
+                    );
+                } else {
+                    let mut count = 0u32;
+                    if let Ok(mut entries) = tokio::fs::read_dir(&agents_src).await {
+                        while let Ok(Some(entry)) = entries.next_entry().await {
+                            let path = entry.path();
+                            if path.extension().map(|e| e == "md").unwrap_or(false) {
+                                let dest = agents_dest.join(entry.file_name());
+                                if let Ok(content) = tokio::fs::read(&path).await {
+                                    let _ = tokio::fs::write(&dest, &content).await;
+                                    count += 1;
+                                }
+                            }
+                        }
+                    }
+                    if count > 0 {
+                        tracing::info!(
+                            mission = %mission_id,
+                            count = count,
+                            profile = %profile,
+                            "Synced agents from config profile to workspace"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Sync skills and tools from workspace to mission directory
+    if let Some(lib) = library {
+        let context = format!("mission-{}", mission_id);
+
+        // Sync skills
+        let skill_names = match resolve_workspace_skill_names(workspace, lib).await {
+            Ok(names) => names,
+            Err(e) => {
+                tracing::warn!(
+                    mission = %mission_id,
+                    workspace = %workspace.name,
+                    error = %e,
+                    "Failed to resolve skills from library"
+                );
+                Vec::new()
+            }
+        };
+        if !skill_names.is_empty() {
+            if let Err(e) = sync_skills_to_dir(&dir, &skill_names, &context, lib).await {
+                tracing::warn!(
+                    mission = %mission_id,
+                    workspace = %workspace.name,
+                    error = %e,
+                    "Failed to sync skills to mission directory"
+                );
+            }
+        }
+
+        // Sync library agents (used by mission agent selection)
+        let agent_names = match lib.list_library_agents().await {
+            Ok(agents) => agents.into_iter().map(|agent| agent.name).collect(),
+            Err(e) => {
+                tracing::warn!(
+                    mission = %mission_id,
+                    workspace = %workspace.name,
+                    error = %e,
+                    "Failed to list library agents"
+                );
+                Vec::new()
+            }
+        };
+        if !agent_names.is_empty() {
+            if let Err(e) = sync_agents_to_dir(&dir, &agent_names, &context, lib).await {
+                tracing::warn!(
+                    mission = %mission_id,
+                    workspace = %workspace.name,
+                    error = %e,
+                    "Failed to sync agents to mission directory"
+                );
+            }
+        }
+    }
+
+    Ok(dir)
+}
+
+/// Prepare a workspace directory for a task and write `opencode.json`.
+pub async fn prepare_task_workspace(
+    config: &Config,
+    mcp: &McpRegistry,
+    task_id: Uuid,
+) -> anyhow::Result<PathBuf> {
+    let dir = task_workspace_dir_for_root(&config.working_dir, task_id);
+    prepare_workspace_dir(&dir).await?;
+    let mcp_configs = mcp.list_configs().await;
+    let workspace_env = HashMap::new();
+    write_opencode_config(
+        &dir,
+        mcp_configs,
+        &config.working_dir,
+        WorkspaceType::Host,
+        &workspace_env,
+        None,
+        None, // No command_contents for task workspace
+        None, // shared_network: not relevant for host workspaces
+        None, // custom_providers: none for task workspace
+    )
+    .await?;
+    Ok(dir)
+}
+
+/// Translate a host path to a container-relative path by stripping the workspace root.
+fn translate_to_container_path(host_path: &Path, workspace_root: &Path) -> PathBuf {
+    if let Ok(relative) = host_path.strip_prefix(workspace_root) {
+        // Return as absolute path from container root
+        PathBuf::from("/").join(relative)
+    } else {
+        // Fallback: return original path if it doesn't start with workspace root
+        host_path.to_path_buf()
+    }
+}
+
+/// Write the current workspace context to a runtime file for MCP tools.
+///
+/// For container workspaces, paths are translated to container-relative paths so that
+/// commands executed inside the container can use them directly.
+pub async fn write_runtime_workspace_state(
+    working_dir_root: &Path,
+    workspace: &Workspace,
+    working_dir: &Path,
+    mission_id: Option<Uuid>,
+    context_dir_name: &str,
+) -> anyhow::Result<()> {
+    let runtime_dir = working_dir_root.join(".sandboxed-sh").join("runtime");
+    tokio::fs::create_dir_all(&runtime_dir).await?;
+    let context_root = working_dir_root.join(context_dir_name);
+    let mission_context = mission_id.map(|id| context_root.join(id.to_string()));
+    // Create the mission context directory on the host so it exists when bind-mounted
+    if let Some(target) = mission_context.as_ref() {
+        tokio::fs::create_dir_all(target).await?;
+    }
+    // For container workspaces, also create the context directory inside the container
+    // rootfs so files are accessible without relying on bind-mounts (which are
+    // unreliable when using nsenter into an already-running container).
+    if workspace.workspace_type == WorkspaceType::Container {
+        if let Some(mid) = mission_id {
+            let container_context = workspace
+                .path
+                .join("root")
+                .join(context_dir_name)
+                .join(mid.to_string());
+            let _ = tokio::fs::create_dir_all(&container_context).await;
+        }
+    }
+    let context_link = working_dir.join(context_dir_name);
+    if let Some(target) = mission_context.as_ref() {
+        if context_link != context_root {
+            // Use symlink_metadata to avoid following symlinks (prevents ELOOP errors)
+            if tokio::fs::symlink_metadata(&context_link).await.is_ok()
+                && tokio::fs::remove_file(&context_link).await.is_err()
+            {
+                if let Err(e) = tokio::fs::remove_dir_all(&context_link).await {
+                    tracing::warn!(
+                        workspace = %workspace.name,
+                        mission = ?mission_id,
+                        error = %e,
+                        "Failed to clear existing context link"
+                    );
+                }
+            }
+            #[cfg(unix)]
+            {
+                // For container workspaces, the symlink must point to the container path
+                // since /root/context is bind-mounted, not the host path
+                let symlink_target = if workspace.workspace_type == WorkspaceType::Container {
+                    // mission_id is guaranteed Some here because we're inside
+                    // `if let Some(target) = mission_context.as_ref()` and
+                    // mission_context is derived from mission_id.map(...)
+                    PathBuf::from("/root").join(context_dir_name).join(
+                        mission_id
+                            .expect("mission_id must be Some inside mission_context block")
+                            .to_string(),
+                    )
+                } else {
+                    target.clone()
+                };
+                if let Err(e) = std::os::unix::fs::symlink(&symlink_target, &context_link) {
+                    tracing::warn!(
+                        workspace = %workspace.name,
+                        mission = ?mission_id,
+                        error = %e,
+                        "Failed to create context symlink; falling back to directory"
+                    );
+                    let _ = tokio::fs::create_dir_all(&context_link).await;
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = tokio::fs::create_dir_all(&context_link).await;
+            }
+        } else {
+            tracing::debug!("Skipping context symlink creation; workspace directory is root.");
+        }
+    }
+
+    // For container workspaces, translate paths to container-relative paths.
+    // Inside the container:
+    // - working_dir becomes relative to container root (e.g., /workspaces/<workspace>)
+    // - context is bind-mounted at /root/context
+    let (effective_working_dir, effective_context_root, effective_mission_context): (
+        PathBuf,
+        PathBuf,
+        Option<PathBuf>,
+    ) = if workspace.workspace_type == WorkspaceType::Container {
+        let container_working_dir = translate_to_container_path(working_dir, &workspace.path);
+        // Context is bind-mounted at /root/context inside the container
+        let container_context_root = PathBuf::from("/root").join(context_dir_name);
+        let container_mission_context =
+            mission_id.map(|id| container_context_root.join(id.to_string()));
+        (
+            container_working_dir,
+            container_context_root,
+            container_mission_context,
+        )
+    } else {
+        (
+            working_dir.to_path_buf(),
+            context_root.clone(),
+            mission_context.clone(),
+        )
+    };
+
+    let payload = json!({
+        "workspace_id": workspace.id,
+        "workspace_name": workspace.name,
+        "workspace_type": workspace.workspace_type.as_str(),
+        "workspace_root": workspace.path,
+        "working_dir": effective_working_dir,
+        "mission_id": mission_id,
+        "context_root": effective_context_root,
+        "mission_context": effective_mission_context,
+        "context_dir_name": context_dir_name,
+    });
+
+    // Use per-mission workspace file to avoid race conditions with parallel missions
+    let filename = match mission_id {
+        Some(id) => format!("workspace-{}.json", id),
+        None => "current_workspace.json".to_string(),
+    };
+    let path = runtime_dir.join(&filename);
+    let payload_str = serde_json::to_string_pretty(&payload)?;
+    tokio::fs::write(&path, &payload_str).await?;
+
+    // Also write to current_workspace.json so SANDBOXED_SH_RUNTIME_WORKSPACE_FILE always works.
+    if mission_id.is_some() {
+        let current_path = runtime_dir.join("current_workspace.json");
+        if let Err(e) = tokio::fs::write(&current_path, &payload_str).await {
+            tracing::warn!(
+                workspace = %workspace.name,
+                path = %current_path.display(),
+                error = %e,
+                "Failed to write current_workspace.json"
+            );
+        }
+    }
+
+    // Also write to the working directory itself so MCPs can find it
+    // This allows MCPs to discover workspace context from cwd without racing on a shared file
+    let context_file = working_dir.join(".sandboxed-sh_context.json");
+    if let Err(e) = tokio::fs::write(&context_file, &payload_str).await {
+        tracing::warn!(
+            workspace = %workspace.name,
+            path = %context_file.display(),
+            error = %e,
+            "Failed to write workspace context to working directory"
+        );
+    }
+
+    Ok(())
+}
+
+/// Get the path to the runtime workspace file for a mission.
+///
+/// Per-mission files are used to avoid race conditions when running parallel missions.
+pub fn runtime_workspace_file_path(working_dir_root: &Path, mission_id: Option<Uuid>) -> PathBuf {
+    let runtime_dir = working_dir_root.join(".sandboxed-sh").join("runtime");
+    let filename = match mission_id {
+        Some(id) => format!("workspace-{}.json", id),
+        None => "current_workspace.json".to_string(),
+    };
+    runtime_dir.join(filename)
+}
+
+/// Regenerate `opencode.json` for all workspace directories.
+pub async fn sync_all_workspaces(config: &Config, mcp: &McpRegistry) -> anyhow::Result<usize> {
+    let root = workspaces_root(&config.working_dir);
+    if !root.exists() {
+        return Ok(0);
+    }
+
+    let mut count = 0;
+    let mcp_configs = mcp.list_configs().await;
+    let workspace_env = HashMap::new();
+
+    let mut entries = tokio::fs::read_dir(&root).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if write_opencode_config(
+            &path,
+            mcp_configs.clone(),
+            &config.working_dir,
+            WorkspaceType::Host,
+            &workspace_env,
+            None,
+            None, // No command_contents for migration
+            None, // shared_network: not relevant for host workspaces
+            None, // custom_providers: none for migration
+        )
+        .await
+        .is_ok()
+        {
+            count += 1;
+        }
+    }
+
+    Ok(count)
+}
+
+/// Resolve the workspace root path for a mission.
+/// Falls back to `config.working_dir` if the workspace is missing.
+pub async fn resolve_workspace_root(
+    workspaces: &SharedWorkspaceStore,
+    config: &Config,
+    workspace_id: Option<Uuid>,
+) -> PathBuf {
+    let id = workspace_id.unwrap_or(DEFAULT_WORKSPACE_ID);
+    match workspaces.get(id).await {
+        Some(ws) => ws.path,
+        None => {
+            warn!(
+                "Workspace {} not found; using default working_dir {}",
+                id,
+                config.working_dir.display()
+            );
+            config.working_dir.clone()
+        }
+    }
+}
+
+/// Resolve the workspace for a mission, including skills and plugins.
+/// Falls back to a default host workspace if not found.
+pub async fn resolve_workspace(
+    workspaces: &SharedWorkspaceStore,
+    config: &Config,
+    workspace_id: Option<Uuid>,
+) -> Workspace {
+    let id = workspace_id.unwrap_or(DEFAULT_WORKSPACE_ID);
+    match workspaces.get(id).await {
+        Some(ws) => ws,
+        None => {
+            warn!("Workspace {} not found; using default host workspace", id);
+            Workspace::default_host(config.working_dir.clone())
+        }
+    }
+}
+
+fn find_host_binary(name: &str, working_dir: &Path) -> Option<PathBuf> {
+    let candidates = [
+        working_dir.join("target").join("release").join(name),
+        working_dir.join("target").join("debug").join(name),
+    ];
+
+    for candidate in candidates {
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    if let Ok(path_var) = std::env::var("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            let candidate = dir.join(name);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    // Fall back to common install locations even if PATH is trimmed.
+    let fallback = PathBuf::from("/usr/local/bin").join(name);
+    if fallback.exists() {
+        return Some(fallback);
+    }
+
+    None
+}
+
+async fn copy_binary_into_container(
+    working_dir: &Path,
+    container_root: &Path,
+    binary: &str,
+) -> anyhow::Result<()> {
+    let source = find_host_binary(binary, working_dir)
+        .ok_or_else(|| anyhow::anyhow!(format!("{} binary not found in target or PATH", binary)))?;
+
+    let dest_dir = container_root.join("usr/local/bin");
+    tokio::fs::create_dir_all(&dest_dir).await?;
+    let dest = dest_dir.join(binary);
+    let tmp = dest.with_extension(format!("tmp-{}", std::process::id()));
+    tokio::fs::copy(&source, &tmp).await?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o755);
+        tokio::fs::set_permissions(&tmp, perms).await?;
+    }
+
+    tokio::fs::rename(&tmp, &dest).await?;
+
+    Ok(())
+}
+
+async fn sync_workspace_mcp_binaries(
+    working_dir: &Path,
+    container_root: &Path,
+) -> anyhow::Result<()> {
+    // Copy runtime binaries into the container so per-workspace harnesses can
+    // start even when the image lacks the host's developer tooling.
+    for binary in [
+        "opencode",
+        "curl",
+        "wget",
+        "bunx",
+        "npx",
+        "workspace-mcp",
+        "desktop-mcp",
+        "orchestrator-mcp",
+        "automation-manager-mcp",
+    ] {
+        if find_host_binary(binary, working_dir).is_none() {
+            tracing::warn!(binary, "MCP binary not found on host; skipping copy");
+            continue;
+        }
+        copy_binary_into_container(working_dir, container_root, binary).await?;
+    }
+    Ok(())
+}
+
+pub async fn sync_workspace_mcp_binaries_for_workspace(
+    working_dir: &Path,
+    workspace: &Workspace,
+) -> anyhow::Result<()> {
+    if workspace.workspace_type != WorkspaceType::Container {
+        return Ok(());
+    }
+    sync_workspace_mcp_binaries(working_dir, &workspace.path).await
+}
+
+fn mark_container_fallback(workspace: &mut Workspace, reason: &str) {
+    let mut obj = workspace.config.as_object().cloned().unwrap_or_default();
+    obj.insert("container_fallback".to_string(), json!(true));
+    if !reason.trim().is_empty() {
+        obj.insert("container_fallback_reason".to_string(), json!(reason));
+    }
+    workspace.config = serde_json::Value::Object(obj);
+    workspace
+        .env_vars
+        .entry("SANDBOXED_SH_CONTAINER_FALLBACK".to_string())
+        .or_insert_with(|| "1".to_string());
+}
+
+async fn build_container_fallback(workspace: &mut Workspace, reason: &str) -> anyhow::Result<()> {
+    tracing::warn!(
+        workspace = %workspace.name,
+        reason = %reason,
+        "Container fallback enabled; workspace will run on host without systemd-nspawn"
+    );
+
+    tokio::fs::create_dir_all(&workspace.path).await?;
+    for dir in ["bin", "usr", "etc", "var", "root", "tmp"] {
+        let _ = tokio::fs::create_dir_all(workspace.path.join(dir)).await;
+    }
+
+    mark_container_fallback(workspace, reason);
+    workspace.status = WorkspaceStatus::Ready;
+    workspace.error_message = None;
+    Ok(())
+}
+
+/// Build a container workspace.
+pub async fn build_container_workspace(
+    workspace: &mut Workspace,
+    distro: Option<NspawnDistro>,
+    force_rebuild: bool,
+    working_dir: &Path,
+    library: Option<&LibraryStore>,
+) -> anyhow::Result<()> {
+    if workspace.workspace_type != WorkspaceType::Container {
+        return Err(anyhow::anyhow!("Workspace is not a container type"));
+    }
+
+    if !nspawn::nspawn_available() {
+        if nspawn::allow_container_fallback() {
+            return build_container_fallback(workspace, "systemd-nspawn not available").await;
+        }
+        return Err(anyhow::anyhow!(
+            "systemd-nspawn not available; install systemd-container or set SANDBOXED_SH_ALLOW_CONTAINER_FALLBACK=1"
+        ));
+    }
+
+    // Update status to building
+    workspace.status = WorkspaceStatus::Building;
+
+    // If a previous build failed, always rebuild to clear partial state.
+    let force_rebuild = force_rebuild || workspace.error_message.is_some();
+
+    let distro = distro.unwrap_or_default();
+
+    // Check if already built with the right distro
+    if nspawn::is_container_ready(&workspace.path) {
+        if !force_rebuild {
+            if let Some(existing) = nspawn::detect_container_distro(&workspace.path).await {
+                if existing == distro {
+                    tracing::info!(
+                        "Container already exists at {} with distro {}",
+                        workspace.path.display(),
+                        distro.as_str()
+                    );
+                    if let Err(e) = sync_workspace_mcp_binaries(working_dir, &workspace.path).await
+                    {
+                        workspace.status = WorkspaceStatus::Error;
+                        workspace.error_message =
+                            Some(format!("Failed to sync MCP binaries: {}", e));
+                        return Err(e);
+                    }
+                    workspace.status = WorkspaceStatus::Ready;
+                    workspace.error_message = None;
+                    return Ok(());
+                }
+                tracing::info!(
+                    "Container exists at {} with distro {}, rebuilding to {}",
+                    workspace.path.display(),
+                    existing.as_str(),
+                    distro.as_str()
+                );
+            } else {
+                tracing::info!(
+                    "Container exists at {} with unknown distro, rebuilding to {}",
+                    workspace.path.display(),
+                    distro.as_str()
+                );
+            }
+        } else {
+            tracing::info!(
+                "Forcing rebuild of container at {} to distro {}",
+                workspace.path.display(),
+                distro.as_str()
+            );
+        }
+        nspawn::destroy_container(&workspace.path).await?;
+    }
+
+    tracing::info!(
+        "Building container workspace at {} with distro {}",
+        workspace.path.display(),
+        distro.as_str()
+    );
+
+    // Initialize the build log so the dashboard can show progress immediately.
+    let build_log = nspawn::build_log_path_for(&workspace.path);
+    let _ = std::fs::write(
+        &build_log,
+        format!(
+            "[sandboxed] Building container with {} (this may take a few minutes)...\n",
+            distro.as_str()
+        ),
+    );
+
+    // Create the container
+    match nspawn::create_container(&workspace.path, distro).await {
+        Ok(()) => {
+            append_to_init_log(&workspace.path, "[sandboxed] Base system installed\n");
+            match seed_shard_data(&workspace.path).await {
+                Ok(true) => {
+                    tracing::info!(workspace = %workspace.name, "Seeded Shard data into container workspace")
+                }
+                Ok(false) => {
+                    tracing::debug!(workspace = %workspace.name, "No Shard seed directory found to copy")
+                }
+                Err(e) => {
+                    tracing::warn!(workspace = %workspace.name, error = %e, "Failed to seed Shard data into container")
+                }
+            }
+
+            if let Err(e) = sync_workspace_mcp_binaries(working_dir, &workspace.path).await {
+                workspace.status = WorkspaceStatus::Error;
+                workspace.error_message = Some(format!("Failed to sync MCP binaries: {}", e));
+                tracing::error!(workspace = %workspace.name, error = %e, "Failed to sync MCP binaries into container workspace");
+                return Err(e);
+            }
+
+            let has_init_scripts = !workspace.init_scripts.is_empty();
+            let has_custom_script = workspace
+                .init_script
+                .as_ref()
+                .is_some_and(|s| !s.trim().is_empty());
+            if has_init_scripts || has_custom_script {
+                append_to_init_log(&workspace.path, "[sandboxed] Running init script...\n");
+            }
+            if let Err(e) = run_workspace_init_script(workspace, library).await {
+                append_to_init_log(
+                    &workspace.path,
+                    &format!("[sandboxed] Init script failed: {}\n", e),
+                );
+                workspace.status = WorkspaceStatus::Error;
+                workspace.error_message = Some(format!("Init script failed: {}", e));
+                tracing::error!("Init script failed: {}", e);
+                return Err(e);
+            }
+            append_to_init_log(&workspace.path, "[sandboxed] Installing harnesses...\n");
+            if let Err(e) = bootstrap_workspace_harnesses(workspace).await {
+                tracing::warn!(
+                    workspace = %workspace.name,
+                    error = %e,
+                    "Harness bootstrap failed; workspace will still be marked ready"
+                );
+            }
+            workspace.status = WorkspaceStatus::Ready;
+            workspace.error_message = None;
+            tracing::info!("Container workspace built successfully");
+            Ok(())
+        }
+        Err(e) => {
+            workspace.status = WorkspaceStatus::Error;
+            workspace.error_message = Some(format!("Container build failed: {}", e));
+            tracing::error!("Failed to build container: {}", e);
+            if nspawn::allow_container_fallback() {
+                let reason = format!("container build failed: {}", e);
+                build_container_fallback(workspace, &reason).await
+            } else {
+                Err(anyhow::anyhow!("Container build failed: {}", e))
+            }
+        }
+    }
+}
+
+/// Append a line to the container's init log (var/log/sandboxed-init.log).
+/// Falls back to the build log sibling file if the container filesystem isn't ready yet.
+fn append_to_init_log(container_path: &Path, msg: &str) {
+    use std::io::Write;
+    let log_path = container_path.join("var/log/sandboxed-init.log");
+    let target = if log_path.parent().is_some_and(|p| p.exists()) {
+        log_path
+    } else {
+        nspawn::build_log_path_for(container_path)
+    };
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&target)
+    {
+        let _ = f.write_all(msg.as_bytes());
+    }
+}
+
+async fn seed_shard_data(container_root: &Path) -> anyhow::Result<bool> {
+    let seed_dir = std::env::var("SANDBOXED_SH_SHARD_SEED")
+        .ok()
+        .filter(|path| !path.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|home| PathBuf::from(home).join(".shard"))
+        })
+        .or_else(|| {
+            let fallback = PathBuf::from("/root/.shard");
+            if fallback.exists() {
+                Some(fallback)
+            } else {
+                None
+            }
+        });
+
+    let Some(seed_dir) = seed_dir else {
+        return Ok(false);
+    };
+
+    if !seed_dir.exists() || !seed_dir.is_dir() {
+        return Ok(false);
+    }
+
+    let dest_dir = container_root.join("root/.shard");
+    let _ = tokio::fs::remove_dir_all(&dest_dir).await;
+    copy_dir_recursive(&seed_dir, &dest_dir).await?;
+
+    Ok(true)
+}
+
+use crate::util::copy_dir_recursive;
+
+async fn bootstrap_workspace_harnesses(workspace: &Workspace) -> anyhow::Result<()> {
+    if workspace.workspace_type != WorkspaceType::Container || !use_nspawn_for_workspace(workspace)
+    {
+        return Ok(());
+    }
+
+    let install_claudecode = env_var_bool("SANDBOXED_SH_BOOTSTRAP_CLAUDECODE", true);
+    let install_opencode = env_var_bool("SANDBOXED_SH_BOOTSTRAP_OPENCODE", true);
+    let install_grok = env_var_bool("SANDBOXED_SH_BOOTSTRAP_GROK", true);
+
+    if !install_claudecode && !install_opencode && !install_grok {
+        return Ok(());
+    }
+
+    let script = format!(
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+
+LOG=/var/log/sandboxed-init.log
+exec >>"$LOG" 2>&1
+
+echo "[sandboxed] Harness bootstrap start"
+
+# Keep bun global bin dirs discoverable for command checks and installed CLIs.
+export PATH="/root/.bun/bin:/root/.cache/.bun/bin:$PATH"
+
+# --- Patched: bootstrap a minbase debootstrap rootfs into a usable state.
+#     Without these the rest of this script no-ops (no bun, no npm, no curl)
+#     and the workspace ends up unusable for missions.
+export DEBIAN_FRONTEND=noninteractive
+if ! command -v curl >/dev/null 2>&1; then
+  echo "[sandboxed] baseline rootfs prereqs: installing curl/ca-certs/gnupg/git/jq/python3/build-essential"
+  apt-get update -qq || true
+  apt-get install -y -qq --no-install-recommends curl ca-certificates gnupg git jq python3 wget build-essential || true
+fi
+if ! command -v node >/dev/null 2>&1 && ! command -v bun >/dev/null 2>&1; then
+  echo "[sandboxed] baseline rootfs prereqs: installing Node.js 22 (NodeSource)"
+  curl -fsSL https://deb.nodesource.com/setup_22.x | bash - >/dev/null 2>&1 || true
+  apt-get install -y -qq --no-install-recommends nodejs || true
+fi
+
+# Ensure bun is in PATH first (it's our preferred package manager)
+if [ -x /root/.bun/bin/bun ] && ! command -v bun >/dev/null 2>&1; then
+  ln -sf /root/.bun/bin/bun /usr/local/bin/bun || true
+  if [ -x /root/.bun/bin/bunx ]; then
+    ln -sf /root/.bun/bin/bunx /usr/local/bin/bunx || true
+  fi
+  echo "[sandboxed] Linked bun into /usr/local/bin"
+fi
+
+CLAUDE_CODE_VERSION="${{SANDBOXED_SH_CLAUDECODE_VERSION:-2.1.139}}"
+claude_needs_install=true
+if command -v claude >/dev/null 2>&1; then
+  if claude --version 2>&1 | grep -F "$CLAUDE_CODE_VERSION" >/dev/null 2>&1; then
+    claude_needs_install=false
+  else
+    echo "[sandboxed] Claude Code version mismatch; installing $CLAUDE_CODE_VERSION"
+  fi
+fi
+
+# Detect package manager: prefer bun, fallback to npm
+if command -v bun >/dev/null 2>&1; then
+  PKG_MGR="bun"
+elif command -v npm >/dev/null 2>&1; then
+  PKG_MGR="npm"
+else
+  PKG_MGR=""
+  echo "[sandboxed] No package manager (bun/npm) found; skipping harness install"
+fi
+
+if [ -n "$PKG_MGR" ]; then
+  # --- Patched: claude-code via npm to dodge bun ELF wrapping bug.
+  #     bun global-install of @anthropic-ai/claude-code points the
+  #     `claude` exec at the precompiled ELF inside the platform sub-package
+  #     and bun then tries to interpret it as JavaScript at runtime
+  #     (`error: Unexpected at .../claude:1:1`). npm wraps platform packages
+  #     correctly, so use npm for claude even when bun is preferred elsewhere.
+  CLAUDE_PKG_MGR="$PKG_MGR"
+  if [ "$PKG_MGR" = "bun" ] && command -v npm >/dev/null 2>&1; then
+    CLAUDE_PKG_MGR="npm"
+  fi
+  if [ "{install_claudecode}" = "true" ] && [ "$claude_needs_install" = "true" ]; then
+    echo "[sandboxed] Installing Claude Code $CLAUDE_CODE_VERSION via $CLAUDE_PKG_MGR..."
+    if ! $CLAUDE_PKG_MGR install -g @anthropic-ai/claude-code@"$CLAUDE_CODE_VERSION"; then
+      echo "[sandboxed] Claude Code install failed"
+    fi
+  fi
+  if [ "{install_opencode}" = "true" ] && ! command -v opencode >/dev/null 2>&1; then
+    if command -v curl >/dev/null 2>&1; then
+      echo "[sandboxed] Installing opencode..."
+      if curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path; then
+        if [ -x \"$HOME/.opencode/bin/opencode\" ]; then
+          if command -v install >/dev/null 2>&1; then
+            install -m 0755 \"$HOME/.opencode/bin/opencode\" /usr/local/bin/opencode || true
+          else
+            cp \"$HOME/.opencode/bin/opencode\" /usr/local/bin/opencode && chmod 755 /usr/local/bin/opencode || true
+          fi
+        fi
+      else
+        echo "[sandboxed] OpenCode CLI install failed"
+      fi
+    else
+      echo "[sandboxed] curl not found; skipping opencode install"
+    fi
+  fi
+fi
+
+if [ "{install_grok}" = "true" ] && ! command -v grok >/dev/null 2>&1; then
+  if command -v curl >/dev/null 2>&1; then
+    echo "[sandboxed] Installing Grok Build..."
+    if ! curl -fsSL https://x.ai/cli/install.sh | GROK_BIN_DIR=/usr/local/bin bash; then
+      echo "[sandboxed] Grok Build CLI install failed"
+    fi
+  else
+    echo "[sandboxed] curl not found; skipping Grok Build install"
+  fi
+fi
+
+echo "[sandboxed] Harness bootstrap done"
+"#
+    );
+
+    let script_path = workspace.path.join("sandboxed-bootstrap.sh");
+    tokio::fs::write(&script_path, script).await?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o755);
+        tokio::fs::set_permissions(&script_path, perms).await?;
+    }
+
+    let shell = if workspace.path.join("bin/bash").exists() {
+        "/bin/bash"
+    } else {
+        "/bin/sh"
+    };
+
+    let config = nspawn::NspawnConfig {
+        env: workspace.env_vars.clone(),
+        ..Default::default()
+    };
+
+    let command = vec![shell.to_string(), "/sandboxed-bootstrap.sh".to_string()];
+    let output = nspawn::execute_in_container(&workspace.path, &command, &config).await?;
+
+    let _ = tokio::fs::remove_file(&script_path).await;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut message = String::new();
+        if !stderr.trim().is_empty() {
+            message.push_str(stderr.trim());
+        }
+        if !stdout.trim().is_empty() {
+            if !message.is_empty() {
+                message.push_str(" | ");
+            }
+            message.push_str(stdout.trim());
+        }
+        if message.is_empty() {
+            message = "Harness bootstrap failed with no output".to_string();
+        }
+        return Err(anyhow::anyhow!(message));
+    }
+
+    Ok(())
+}
+
+async fn run_workspace_init_script(
+    workspace: &Workspace,
+    library: Option<&LibraryStore>,
+) -> anyhow::Result<()> {
+    let has_fragments = !workspace.init_scripts.is_empty();
+    let custom_script = workspace
+        .init_script
+        .as_ref()
+        .map(|s| s.trim())
+        .unwrap_or("");
+
+    // If there are fragments and we have a library, assemble them
+    let script = if has_fragments {
+        if let Some(library) = library {
+            // Assemble fragments + custom script
+            let custom = if custom_script.is_empty() {
+                None
+            } else {
+                Some(custom_script)
+            };
+
+            // Collect setup commands from workspace skills
+            let skill_setup_commands = if !workspace.skills.is_empty() {
+                let commands = library
+                    .collect_skill_setup_commands(&workspace.skills)
+                    .await;
+                if commands.is_empty() {
+                    None
+                } else {
+                    tracing::info!(
+                        workspace = %workspace.name,
+                        skills_with_setup = commands.len(),
+                        "Collected setup commands from {} skills",
+                        commands.len()
+                    );
+                    Some(commands)
+                }
+            } else {
+                None
+            };
+
+            match library
+                .assemble_init_script(
+                    &workspace.init_scripts,
+                    custom,
+                    skill_setup_commands.as_deref(),
+                )
+                .await
+            {
+                Ok(assembled) => assembled,
+                Err(e) => {
+                    tracing::warn!(
+                        workspace = %workspace.name,
+                        error = %e,
+                        "Failed to assemble init script fragments, falling back to custom script only"
+                    );
+                    custom_script.to_string()
+                }
+            }
+        } else {
+            // No library available, just use custom script
+            tracing::warn!(
+                workspace = %workspace.name,
+                "Init script fragments specified but library not available"
+            );
+            custom_script.to_string()
+        }
+    } else {
+        // No fragments, just use custom script
+        custom_script.to_string()
+    };
+
+    if script.is_empty() {
+        return Ok(());
+    }
+
+    let script_path = workspace.path.join("sandboxed-init.sh");
+    tokio::fs::write(&script_path, &script).await?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o755);
+        tokio::fs::set_permissions(&script_path, perms).await?;
+    }
+
+    let shell = if workspace.path.join("bin/bash").exists() {
+        "/bin/bash"
+    } else {
+        "/bin/sh"
+    };
+
+    let config = nspawn::NspawnConfig {
+        env: workspace.env_vars.clone(),
+        ..Default::default()
+    };
+
+    let command = vec![shell.to_string(), "/sandboxed-init.sh".to_string()];
+
+    // Determine log file path for streaming output
+    let log_path = workspace.path.join("var/log/sandboxed-init.log");
+    let log_file = if log_path.parent().is_some_and(|p| p.exists()) {
+        log_path
+    } else {
+        nspawn::build_log_path_for(&workspace.path)
+    };
+
+    // Use streaming execution to show logs in real-time
+    let status =
+        nspawn::execute_in_container_streaming(&workspace.path, &command, &config, &log_file)
+            .await?;
+
+    // Clean up the script file after execution.
+    let _ = tokio::fs::remove_file(&script_path).await;
+
+    if !status.success() {
+        return Err(anyhow::anyhow!(
+            "Init script failed with exit code {}",
+            status.code().unwrap_or(-1)
+        ));
+    }
+
+    Ok(())
+}
+
+/// Destroy a container workspace.
+pub async fn destroy_container_workspace(workspace: &Workspace) -> anyhow::Result<()> {
+    if workspace.workspace_type != WorkspaceType::Container {
+        return Err(anyhow::anyhow!("Workspace is not a container type"));
+    }
+
+    tracing::info!(
+        "Destroying container workspace at {}",
+        workspace.path.display()
+    );
+
+    if !use_nspawn_for_workspace(workspace) {
+        // Fallback workspaces are plain directories on the host.
+        let _ = tokio::fs::remove_dir_all(&workspace.path).await;
+        return Ok(());
+    }
+
+    nspawn::destroy_container(&workspace.path).await?;
+
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Config Sync (Library → System)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Resolve the path to the OpenCode config directory.
+/// Uses OPENCODE_CONFIG_DIR env var or falls back to ~/.config/opencode/
+fn resolve_opencode_config_dir() -> std::path::PathBuf {
+    if let Ok(dir) = std::env::var("OPENCODE_CONFIG_DIR") {
+        return std::path::PathBuf::from(dir);
+    }
+    std::path::PathBuf::from(home_dir())
+        .join(".config")
+        .join("opencode")
+}
+
+/// Sync sandboxed/config.json from Library to the working directory.
+/// This makes Library-backed agent visibility settings available.
+pub async fn sync_sandboxed_config(
+    library: &crate::library::LibraryStore,
+    working_dir: &std::path::Path,
+) -> anyhow::Result<()> {
+    let config = library.get_sandboxed_config().await?;
+
+    let dest_dir = working_dir.join(".sandboxed-sh");
+    let dest_path = dest_dir.join("config.json");
+
+    // Ensure directory exists
+    tokio::fs::create_dir_all(&dest_dir).await?;
+
+    let content = serde_json::to_string_pretty(&config)?;
+    tokio::fs::write(&dest_path, content).await?;
+
+    tracing::info!(
+        path = %dest_path.display(),
+        "Synced sandboxed config from Library"
+    );
+
+    Ok(())
+}
+
+/// Write sandboxed/config.json to the working directory.
+/// Useful when the Library is not configured but the UI still needs local defaults.
+pub async fn write_sandboxed_config(
+    working_dir: &std::path::Path,
+    config: &crate::library::SandboxedConfig,
+) -> anyhow::Result<()> {
+    let dest_dir = working_dir.join(".sandboxed-sh");
+    let dest_path = dest_dir.join("config.json");
+
+    tokio::fs::create_dir_all(&dest_dir).await?;
+
+    let content = serde_json::to_string_pretty(&config)?;
+    tokio::fs::write(&dest_path, content).await?;
+
+    tracing::info!(
+        path = %dest_path.display(),
+        "Wrote sandboxed config to working directory"
+    );
+
+    Ok(())
+}
+
+/// Read the Sandboxed config from the working directory.
+/// Returns default config if the file doesn't exist.
+pub async fn read_sandboxed_config(
+    working_dir: &std::path::Path,
+) -> crate::library::SandboxedConfig {
+    let path = working_dir.join(".sandboxed-sh/config.json");
+
+    if !path.exists() {
+        return crate::library::SandboxedConfig::default();
+    }
+
+    match tokio::fs::read_to_string(&path).await {
+        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+        Err(_) => crate::library::SandboxedConfig::default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_merge_json_objects() {
+        let mut base = json!({"a": 1, "b": 2});
+        let overlay = json!({"b": 99, "c": 3});
+        merge_json(&mut base, &overlay);
+        assert_eq!(base, json!({"a": 1, "b": 99, "c": 3}));
+    }
+
+    #[test]
+    fn bash_pretool_script_bakes_rtk_flag() {
+        let on = render_bash_pretool_script(true);
+        let off = render_bash_pretool_script(false);
+        assert!(on.contains("RTK_ENABLED=true"));
+        assert!(off.contains("RTK_ENABLED=false"));
+    }
+
+    #[test]
+    fn bash_pretool_script_rtk_off_skips_rtk_binary_lookup() {
+        // When RTK_ENABLED=false the script must evaluate RTK_PATH to the
+        // empty string, so eligible commands fall through to the `gh` bugfix
+        // branch instead of being rewritten with rtk.
+        let script = render_bash_pretool_script(false);
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &script).unwrap();
+
+        // ls → when RTK is off, script must NOT rewrite (no output); exits 0 with no stdout.
+        let out = std::process::Command::new("bash")
+            .arg(tmp.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                child
+                    .stdin
+                    .as_mut()
+                    .unwrap()
+                    .write_all(br#"{"tool_input":{"command":"ls -la"}}"#)
+                    .unwrap();
+                child.wait_with_output()
+            })
+            .unwrap();
+        assert!(out.status.success(), "script failed: {:?}", out);
+        assert!(
+            out.stdout.is_empty(),
+            "expected no rewrite, got: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+
+    #[test]
+    fn bash_pretool_script_gh_bugfix_runs_even_when_rtk_off() {
+        // The `gh` TERM=dumb fix is independent of RTK and must fire regardless.
+        let script = render_bash_pretool_script(false);
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &script).unwrap();
+
+        let out = std::process::Command::new("bash")
+            .arg(tmp.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                child
+                    .stdin
+                    .as_mut()
+                    .unwrap()
+                    .write_all(br#"{"tool_input":{"command":"gh pr list"}}"#)
+                    .unwrap();
+                child.wait_with_output()
+            })
+            .unwrap();
+        assert!(out.status.success(), "script failed: {:?}", out);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("env TERM=dumb gh pr list"),
+            "expected gh TERM=dumb rewrite, got: {}",
+            stdout
+        );
+    }
+
+    #[test]
+    fn test_merge_json_arrays_concatenate() {
+        let mut base = json!({"hooks": [1, 2]});
+        let overlay = json!({"hooks": [3, 4]});
+        merge_json(&mut base, &overlay);
+        assert_eq!(base, json!({"hooks": [1, 2, 3, 4]}));
+    }
+
+    #[test]
+    fn test_merge_json_nested_objects() {
+        let mut base = json!({"permissions": {"allow": ["Bash"]}, "x": 1});
+        let overlay = json!({"permissions": {"allow": ["Edit"], "deny": []}, "y": 2});
+        merge_json(&mut base, &overlay);
+        assert_eq!(
+            base,
+            json!({"permissions": {"allow": ["Bash", "Edit"], "deny": []}, "x": 1, "y": 2})
+        );
+    }
+
+    #[test]
+    fn test_merge_json_scalar_overlay_wins() {
+        let mut base = json!({"key": "profile-value"});
+        let overlay = json!({"key": "generated-value"});
+        merge_json(&mut base, &overlay);
+        assert_eq!(base, json!({"key": "generated-value"}));
+    }
+
+    #[test]
+    fn test_merge_json_profile_key_survives_when_not_in_overlay() {
+        let mut base = json!({"hooks": {"Stop": [{"matcher": ""}]}, "mcpServers": {}});
+        let overlay =
+            json!({"mcpServers": {"workspace-mcp": {}}, "permissions": {"allow": ["Bash"]}});
+        merge_json(&mut base, &overlay);
+        // hooks from profile survive; mcpServers and permissions come from overlay
+        assert!(base["hooks"]["Stop"].is_array());
+        assert!(base["mcpServers"]["workspace-mcp"].is_object());
+        assert_eq!(base["permissions"]["allow"][0], "Bash");
+    }
+
+    #[test]
+    fn test_codex_profile_preserves_otel_sections() {
+        let profile = "[otel]\nenvironment = \"production\"\n\n[otel.exporter.otlp-http]\nendpoint = \"http://localhost:3100\"\n";
+        let entries = vec![CodexMcpEntry {
+            name: "workspace".to_string(),
+            command: Some("/usr/local/bin/workspace-mcp".to_string()),
+            args: vec![],
+            env: HashMap::new(),
+            url: None,
+            headers: HashMap::new(),
+        }];
+        let result = update_codex_mcp_config(profile, &entries);
+        assert!(result.contains("[otel]"));
+        assert!(result.contains("[otel.exporter.otlp-http]"));
+        assert!(result.contains("[mcp_servers.workspace]"));
+    }
+
+    #[test]
+    fn test_codex_profile_replaces_stale_mcp() {
+        let profile = "[otel]\nenv = \"prod\"\n\n[mcp_servers.old]\ncommand = \"old\"\n";
+        let entries = vec![CodexMcpEntry {
+            name: "old".to_string(),
+            command: Some("new".to_string()),
+            args: vec![],
+            env: HashMap::new(),
+            url: None,
+            headers: HashMap::new(),
+        }];
+        let result = update_codex_mcp_config(profile, &entries);
+        assert!(result.contains("[otel]"));
+        assert!(result.contains("\"new\""));
+        assert!(!result.contains("\"old\""));
+    }
+
+    #[test]
+    fn test_codex_empty_profile_clears_stale_config() {
+        // Empty profile is authoritative — stale non-MCP sections must not survive
+        let result = update_codex_mcp_config("", &[]);
+        assert!(!result.contains("[otel]"));
+        assert!(!result.contains("[mcp_servers"));
+    }
+}

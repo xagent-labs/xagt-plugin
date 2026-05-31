@@ -1,0 +1,44 @@
+# Example Hermes config.yaml for the sandboxed.sh Assistant runtime.
+# Install as /var/lib/hermes-assistant-dev/config.yaml or under the HERMES_HOME
+# you choose for the service.
+
+model:
+  provider: custom
+  default: ${HERMES_ASSISTANT_MODEL}
+  base_url: ${OPENAI_BASE_URL}
+  api_key: ${OPENAI_API_KEY}
+  api_mode: chat_completions
+
+terminal:
+  # Keep Hermes' own shell/tool execution scoped to the assistant workspace.
+  # Sandboxed mission work should go through assistant-mcp.
+  backend: local
+  cwd: /var/lib/hermes-assistant-dev/workspace
+
+mcp_servers:
+  sandboxed_assistant:
+    command: ${HERMES_ASSISTANT_MCP_COMMAND}
+    env:
+      HERMES_SANDBOXED_API_URL: ${HERMES_SANDBOXED_API_URL}
+      HERMES_SANDBOXED_API_TOKEN: ${HERMES_SANDBOXED_API_TOKEN}
+      HERMES_DEFAULT_WORKSPACE_ID: ${HERMES_DEFAULT_WORKSPACE_ID}
+    timeout: 120
+    connect_timeout: 15
+    tools:
+      include:
+        - list_active_missions
+        - list_missions
+        - get_mission
+        - get_mission_events
+        - start_mission
+        - send_message_to_mission
+        - cancel_mission
+        - list_workspaces
+      prompts: false
+      resources: false
+
+display:
+  platforms:
+    telegram:
+      tool_progress: off
+      cleanup_progress: true

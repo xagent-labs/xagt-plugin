@@ -1,0 +1,24 @@
+{
+  "name": "smart-trade-copilot-web",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Autonomous trade-safety agent with a non-overridable deterministic safety core — powered by OKX onchainOS.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "autoprefixer": "^10.5.0",
+    "next": "14.2.5",
+    "openai": "^4.67.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "20.14.0",
+    "@types/react": "18.3.3",
+    "typescript": "5.5.3"
+  }
+}

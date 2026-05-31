@@ -1,0 +1,47 @@
+{
+  "name": "the-desk",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Six agents, one book, every wallet decision black-boxed.",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test dist/tests/*.test.js",
+    "demo": "npm run build && node dist/src/cli/run-demo.js",
+    "scan": "npm run build && node dist/src/cli/run-scan.js",
+    "app": "npm run demo && npm run scan && node scripts/dev-app.mjs",
+    "web:build": "npm run demo && npm run scan && vite build",
+    "web:preview": "vite preview --host 127.0.0.1 --port 4173",
+    "replay": "npm run build && node dist/blackbox/replay.js",
+    "verify": "npm run build && node dist/blackbox/verify.js",
+    "blackbox:verify-chain": "npm run build && node dist/blackbox/verify-chain.js",
+    "blackbox:tamper-demo": "npm run build && node dist/blackbox/tamper-demo.js",
+    "okx:canary": "npm run build && node dist/src/cli/okx-canary.js",
+    "anchor:deploy": "npm run build && node dist/src/cli/deploy-session-anchor.js",
+    "anchor:commit": "npm run build && node dist/src/cli/commit-session-anchor.js",
+    "submission:finalize-anchor": "npm run build && node dist/src/cli/finalize-submission.js",
+    "sprint:audit": "node scripts/audit-sprint.mjs",
+    "sprint:audit:network": "DESK_SPRINT_AUDIT_NETWORK=1 node scripts/audit-sprint.mjs",
+    "submit:check": "npm test && npm run demo && npm run blackbox:verify-chain && npm run web:build",
+    "okx:skills:list": "npx skills add okx/plugin-store --list --full-depth",
+    "okx:install:plugin-store": "npx skills add okx/plugin-store --skill plugin-store --copy -y",
+    "okx:install:skills": "npx skills add okx/onchainos-skills --all --copy -y && npx skills add okx/plugin-store --skill plugin-store --copy -y",
+    "xagt:setup": "npx @xagt/agent-plugin@latest setup --target all",
+    "xagt:doctor": "npx @xagt/agent-plugin@latest doctor"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "ethers": "^6.16.0",
+    "lucide-react": "^0.468.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "solc": "^0.8.35",
+    "typescript": "^5.8.3",
+    "vite": "^6.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.21",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0"
+  }
+}

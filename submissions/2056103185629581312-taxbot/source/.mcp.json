@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "okx-trade": {
+      "command": "npx",
+      "args": ["-y", "@okx_ai/okx-trade-mcp@latest", "--modules", "spot,account,earn,market", "--read-only"],
+      "env": {
+        "OKX_API_KEY": "${OKX_API_KEY}",
+        "OKX_SECRET_KEY": "${OKX_SECRET_KEY}",
+        "OKX_PASSPHRASE": "${OKX_PASSPHRASE}"
+      }
+    }
+  }
+}

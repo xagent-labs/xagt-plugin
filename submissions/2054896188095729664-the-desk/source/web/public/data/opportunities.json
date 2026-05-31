@@ -1,0 +1,2752 @@
+{
+  "generatedAt": "2026-05-17T23:34:30.719Z",
+  "mode": "live",
+  "sourceMode": "live-scout",
+  "summary": {
+    "scannedSources": [
+      "DexScreener",
+      "GeckoTerminal",
+      "DexPaprika",
+      "OKX OnchainOS enrichment"
+    ],
+    "opportunityCount": 22,
+    "readyCount": 0,
+    "blockedCount": 7,
+    "clusterCount": 20,
+    "defaultClusterCount": 7
+  },
+  "opportunities": [
+    {
+      "id": "geckoterminal:1:0x08368cfb1b69f5821ec0e8340bee726568f8d662",
+      "ticketId": "opp_geckoterminal_eth0x08368cf",
+      "status": "ready",
+      "action": "quote-buy",
+      "actionLabel": "Prepare quote for AWF",
+      "symbol": "AWF",
+      "name": "AWF / WETH",
+      "chain": "Ethereum",
+      "chainIndex": "1",
+      "tokenAddress": "0x08368cfb1b69f5821ec0e8340bee726568f8d662",
+      "source": "GeckoTerminal",
+      "thesis": "geckoterminal live market data shows AWF on Ethereum: liquidity $186.8K, 24h volume $1.79M, 24h move 332.0%; ready for policy-gated OKX quote review.",
+      "invalidation": "Invalidate if liquidity drops below threshold, volume collapses, or the OKX quote/policy gate rejects the route.",
+      "confidence": 93,
+      "score": 99,
+      "freshness": "live GeckoTerminal trending snapshot",
+      "metrics": {
+        "priceUsd": 0.00613227578432565,
+        "liquidityUsd": 186835.2458,
+        "volumeUsd": 1790517.98446224,
+        "priceChangePct": 332.038,
+        "buyTxCount1h": 1989,
+        "sellTxCount1h": 1689,
+        "freshness_minutes": 8135
+      },
+      "risk": {
+        "level": "low",
+        "verdict": "allow",
+        "reasons": [
+          "price, liquidity, volume, and tx-flow cleared emerging-token preflight"
+        ]
+      },
+      "policy": {
+        "allowed": true,
+        "reasons": [
+          "policy allows capped quote-backed action"
+        ]
+      },
+      "proposedOrder": {
+        "mode": "quote-only",
+        "fromAsset": "USDC",
+        "toAsset": "AWF",
+        "amountUsd": 25,
+        "slippageBps": 100,
+        "quoteStatus": "not-quoted",
+        "route": "USDC -> AWF (OKX quote pending)"
+      },
+      "evidence": [
+        {
+          "source": "GeckoTerminal",
+          "skill": "geckoterminal-trending",
+          "summary": "GeckoTerminal trending pool with $186.8K reserve and $1.79M 24h volume.",
+          "timestamp": "2026-05-17T23:34:21.314Z"
+        }
+      ],
+      "category": "trending"
+    },
+    {
+      "id": "geckoterminal:1:0x742cd307398a7340e68080417b4dcf50976bc872",
+      "ticketId": "opp_geckoterminal_eth0x742cd30",
+      "status": "ready",
+      "action": "quote-buy",
+      "actionLabel": "Prepare quote for K9",
+      "symbol": "K9",
+      "name": "K9 / WETH 1%",
+      "chain": "Ethereum",
+      "chainIndex": "1",
+      "tokenAddress": "0x742cd307398a7340e68080417b4dcf50976bc872",
+      "source": "GeckoTerminal",
+      "thesis": "geckoterminal live market data shows K9 on Ethereum: liquidity $34.4K, 24h volume $116.3K, 24h move 20.6%; ready for policy-gated OKX quote review.",
+      "invalidation": "Invalidate if liquidity drops below threshold, volume collapses, or the OKX quote/policy gate rejects the route.",
+      "confidence": 93,
+      "score": 99,
+      "freshness": "live GeckoTerminal trending snapshot",
+      "metrics": {
+        "priceUsd": 0.000331248707957365,
+        "liquidityUsd": 34444.5727,
+        "volumeUsd": 116260.91213303,
+        "priceChangePct": 20.642,
+        "buyTxCount1h": 479,
+        "sellTxCount1h": 382,
+        "freshness_minutes": 77803
+      },
+      "risk": {
+        "level": "low",
+        "verdict": "allow",
+        "reasons": [
+          "price, liquidity, volume, and tx-flow cleared emerging-token preflight"
+        ]
+      },
+      "policy": {
+        "allowed": true,
+        "reasons": [
+          "policy allows capped quote-backed action"
+        ]
+      },
+      "proposedOrder": {
+        "mode": "quote-only",
+        "fromAsset": "USDC",
+        "toAsset": "K9",
+        "amountUsd": 25,
+        "slippageBps": 100,
+        "quoteStatus": "not-quoted",
+        "route": "USDC -> K9 (OKX quote pending)"
+      },
+      "evidence": [
+        {
+          "source": "GeckoTerminal",
+          "skill": "geckoterminal-trending",
+          "summary": "GeckoTerminal trending pool with $34.4K reserve and $116.3K 24h volume.",
+          "timestamp": "2026-05-17T23:34:21.314Z"
+        }
+      ],
+      "category": "trending"
+    },
+    {
+      "id": "geckoterminal:1:0x329466a48e9375d67ce826d23489e929216f93e36f5fb39eeaf8fb6fba83bdc9",
+      "ticketId": "opp_geckoterminal_eth0x329466a",
+      "status": "ready",
+      "action": "quote-buy",
+      "actionLabel": "Prepare quote for USDUC",
+      "symbol": "USDUC",
+      "name": "USDUC / ETH 0.25%",
+      "chain": "Ethereum",
+      "chainIndex": "1",
+      "tokenAddress": "0x329466a48e9375d67ce826d23489e929216f93e36f5fb39eeaf8fb6fba83bdc9",
+      "source": "GeckoTerminal",
+      "thesis": "geckoterminal live market data shows USDUC on Ethereum: liquidity $14.8K, 24h volume $72.9K, 24h move 972.1%; ready for policy-gated OKX quote review.",
+      "invalidation": "Invalidate if liquidity drops below threshold, volume collapses, or the OKX quote/policy gate rejects the route.",
+      "confidence": 93,
+      "score": 99,
+      "freshness": "live GeckoTerminal new snapshot",
+      "metrics": {
+        "priceUsd": 0.0000220879874087753,
+        "liquidityUsd": 14833.2952,
+        "volumeUsd": 72878.9926592562,
+        "priceChangePct": 972.12,
+        "buyTxCount1h": 155,
+        "sellTxCount1h": 140,
+        "freshness_minutes": 14
+      },
+      "risk": {
+        "level": "low",
+        "verdict": "allow",
+        "reasons": [
+          "price, liquidity, volume, and tx-flow cleared emerging-token preflight"
+        ]
+      },
+      "policy": {
+        "allowed": true,
+        "reasons": [
+          "policy allows capped quote-backed action"
+        ]
+      },
+      "proposedOrder": {
+        "mode": "quote-only",
+        "fromAsset": "USDC",
+        "toAsset": "USDUC",
+        "amountUsd": 25,
+        "slippageBps": 100,
+        "quoteStatus": "not-quoted",
+        "route": "USDC -> USDUC (OKX quote pending)"
+      },
+      "evidence": [
+        {
+          "source": "GeckoTerminal",
+          "skill": "geckoterminal-new",
+          "summary": "GeckoTerminal new pool with $14.8K reserve and $72.9K 24h volume.",
+          "timestamp": "2026-05-17T23:34:21.321Z"
+        }
+      ],
+      "category": "new-launch"
+    },
+    {
+      "id": "geckoterminal:1:0x023789ceb81239da1fee20962f03df37e78bec716604f10456726e8a704daf23",
+      "ticketId": "opp_geckoterminal_eth0x023789c",
+      "status": "ready",
+      "action": "quote-buy",
+      "actionLabel": "Prepare quote for HYKI",
+      "symbol": "HYKI",
+      "name": "HYKI / ETH 0.01%",
+      "chain": "Ethereum",
+      "chainIndex": "1",
+      "tokenAddress": "0x023789ceb81239da1fee20962f03df37e78bec716604f10456726e8a704daf23",
+      "source": "GeckoTerminal",
+      "thesis": "geckoterminal live market data shows HYKI on Ethereum: liquidity $25.7K, 24h volume $2.6K, 24h move 19.3%; ready for policy-gated OKX quote review.",
+      "invalidation": "Invalidate if liquidity drops below threshold, volume collapses, or the OKX quote/policy gate rejects the route.",
+      "confidence": 93,
+      "score": 99,
+      "freshness": "live GeckoTerminal new snapshot",
+      "metrics": {
+        "priceUsd": 26.067688587333,
+        "liquidityUsd": 25671.891,
+        "volumeUsd": 2603.8305132884,
+        "priceChangePct": 19.324,
+        "buyTxCount1h": 19,
+        "sellTxCount1h": 2,
+        "freshness_minutes": 24
+      },
+      "risk": {
+        "level": "low",
+        "verdict": "allow",
+        "reasons": [
+          "price, liquidity, volume, and tx-flow cleared emerging-token preflight"
+        ]
+      },
+      "policy": {
+        "allowed": true,
+        "reasons": [
+          "policy allows capped quote-backed action"
+        ]
+      },
+      "proposedOrder": {
+        "mode": "quote-only",
+        "fromAsset": "USDC",
+        "toAsset": "HYKI",
+        "amountUsd": 25,
+        "slippageBps": 100,
+        "quoteStatus": "not-quoted",
+        "route": "USDC -> HYKI (OKX quote pending)"
+      },
+      "evidence": [
+        {
+          "source": "GeckoTerminal",
+          "skill": "geckoterminal-new",
+          "summary": "GeckoTerminal new pool with $25.7K reserve and $2.6K 24h volume.",
+          "timestamp": "2026-05-17T23:34:21.321Z"
+        }
+      ],
+      "category": "new-launch"
+    },
+    {
+      "id": "geckoterminal:1:0xd7e023a3cb86aa099c3b51a52b03900df1a31bc502bfce0a524ca71053b2cef0",
+      "ticketId": "opp_geckoterminal_eth0xd7e023a",
+      "status": "ready",
+      "action": "quote-buy",
+      "actionLabel": "Prepare quote for OPENHUMAN",
+      "symbol": "OPENHUMAN",
+      "name": "openhuman / ETH 0.01%",
+      "chain": "Ethereum",
+      "chainIndex": "1",
+      "tokenAddress": "0xd7e023a3cb86aa099c3b51a52b03900df1a31bc502bfce0a524ca71053b2cef0",
+      "source": "GeckoTerminal",
+      "thesis": "geckoterminal live market data shows OPENHUMAN on Ethereum: liquidity $34.9K, 24h volume $109.2K, 24h move 6458.0%; ready for policy-gated OKX quote review.",
+      "invalidation": "Invalidate if liquidity drops below threshold, volume collapses, or the OKX quote/policy gate rejects the route.",
+      "confidence": 93,
+      "score": 99,
+      "freshness": "live GeckoTerminal new snapshot",
+      "metrics": {
+        "priceUsd": 0.000155186997927617,
+        "liquidityUsd": 34900.7089,
+        "volumeUsd": 109248.263025662,
+        "priceChangePct": 6458.037,
+        "buyTxCount1h": 224,
+        "sellTxCount1h": 66,
+        "freshness_minutes": 25
+      },
+      "risk": {
+        "level": "low",
+        "verdict": "allow",
+        "reasons": [
+          "price, liquidity, volume, and tx-flow cleared emerging-token preflight"
+        ]
+      },
+      "policy": {
+        "allowed": true,
+        "reasons": [
+          "policy allows capped quote-backed action"
+        ]
+      },
+      "proposedOrder": {
+        "mode": "quote-only",
+        "fromAsset": "USDC",
+        "toAsset": "OPENHUMAN",
+        "amountUsd": 25,
+        "slippageBps": 100,
+        "quoteStatus": "not-quoted",
+        "route": "USDC -> OPENHUMAN (OKX quote pending)"
+      },
+      "evidence": [
+        {
+          "source": "GeckoTerminal",
+          "skill": "geckoterminal-new",
+          "summary": "GeckoTerminal new pool with $34.9K reserve and $109.2K 24h volume.",
+          "timestamp": "2026-05-17T23:34:21.321Z"
+        }
+      ],
+      "category": "new-launch"
+    },
+    {
+      "id": "geckoterminal:1:0x00792c390d61d2ad2dbaa82f5326c297367133b3",
+      "ticketId": "opp_geckoterminal_eth0x00792c3",
+      "status": "ready",
+      "action": "quote-buy",
+      "actionLabel": "Prepare quote for KIRSCHL",
+      "symbol": "KIRSCHL",
+      "name": "kirschl / WETH",
+      "chain": "Ethereum",
+      "chainIndex": "1",
+      "tokenAddress": "0x00792c390d61d2ad2dbaa82f5326c297367133b3",
+      "source": "GeckoTerminal",
+      "thesis": "geckoterminal live market data shows KIRSCHL on Ethereum: liquidity $11.1K, 24h volume $3.1K, 24h move 262.8%; ready for policy-gated OKX quote review.",
+      "invalidation": "Invalidate if liquidity drops below threshold, volume collapses, or the OKX quote/policy gate rejects the route.",
+      "confidence": 93,
+      "score": 99,
+      "freshness": "live GeckoTerminal new snapshot",
+      "metrics": {
+        "priceUsd": 1.06560293691651e-11,
+        "liquidityUsd": 11067.73,
+        "volumeUsd": 3133.044671287,
+        "priceChangePct": 262.781,
+        "buyTxCount1h": 20,
+        "sellTxCount1h": 2,
+        "freshness_minutes": 38
+      },
+      "risk": {
+        "level": "low",
+        "verdict": "allow",
+        "reasons": [
+          "price, liquidity, volume, and tx-flow cleared emerging-token preflight"
+        ]
+      },
+      "policy": {
+        "allowed": true,
+        "reasons": [
+          "policy allows capped quote-backed action"
+        ]
+      },
+      "proposedOrder": {
+        "mode": "quote-only",
+        "fromAsset": "USDC",
+        "toAsset": "KIRSCHL",
+        "amountUsd": 25,
+        "slippageBps": 100,
+        "quoteStatus": "not-quoted",
+        "route": "USDC -> KIRSCHL (OKX quote pending)"
+      },
+      "evidence": [
+        {
+          "source": "GeckoTerminal",
+          "skill": "geckoterminal-new",
+          "summary": "GeckoTerminal new pool with $11.1K reserve and $3.1K 24h volume.",
+          "timestamp": "2026-05-17T23:34:21.321Z"
+        }
+      ],
+      "category": "new-launch"
+    },
+    {
+      "id": "geckoterminal:501:bhbdxsh74dugvbdz78866o9uipfjcx6n7zbsgpc97ttz",
+      "ticketId": "opp_geckoterminal_solanabhbdxs",
+      "status": "ready",
+      "action": "quote-buy",
+      "actionLabel": "Prepare quote for CRYPTOCRAT",
+      "symbol": "CRYPTOCRAT",
+      "name": "Cryptocrat / SOL",
+      "chain": "Solana",
+      "chainIndex": "501",
+      "tokenAddress": "BhBDxSh74dUgVbDZ78866o9UiPfjcX6n7zBSGPC97ttz",
+      "source": "GeckoTerminal",
+      "thesis": "geckoterminal live market data shows CRYPTOCRAT on Solana: liquidity $18.6K, 24h volume $550.4K, 24h move -63.9%; ready for policy-gated OKX quote review.",
+      "invalidation": "Invalidate if liquidity drops below threshold, volume collapses, or the OKX quote/policy gate rejects the route.",
+      "confidence": 93,
+      "score": 99,
+      "freshness": "live GeckoTerminal trending snapshot",
+      "metrics": {
+        "priceUsd": 0.00003541202697651484,
+        "liquidityUsd": 18551.5378,
+        "volumeUsd": 550388.917175565,
+        "priceChangePct": -63.883,
+        "buyTxCount1h": 6068,
+        "sellTxCount1h": 5157,
+        "freshness_minutes": 1954
+      },
+      "risk": {
+        "level": "low",
+        "verdict": "allow",
+        "reasons": [
+          "price, liquidity, volume, and tx-flow cleared emerging-token preflight"
+        ]
+      },
+      "policy": {
+        "allowed": true,
+        "reasons": [
+          "policy allows capped quote-backed action"
+        ]
+      },
+      "proposedOrder": {
+        "mode": "quote-only",
+        "fromAsset": "USDC",
+        "toAsset": "CRYPTOCRAT",
+        "amountUsd": 25,
+        "slippageBps": 100,
+        "quoteStatus": "not-quoted",
+        "route": "USDC -> CRYPTOCRAT (OKX quote pending)"
+      },
+      "evidence": [
+        {
+          "source": "GeckoTerminal",
+          "skill": "geckoterminal-trending",
+          "summary": "GeckoTerminal trending pool with $18.6K reserve and $550.4K 24h volume.",
+          "timestamp": "2026-05-17T23:34:21.323Z"
+        }
+      ],
+      "category": "trending"
+    },
+    {
+      "id": "geckoterminal:501:34utpx3zyyfc5gvqdxwjqlf77bu5ebb6o3c2xynpktzl",
+      "ticketId": "opp_geckoterminal_solana34utpx",
+      "status": "ready",
+      "action": "quote-buy",
+      "actionLabel": "Prepare quote for BABYTROLL",
+      "symbol": "BABYTROLL",
+      "name": "BABYTROLL / SOL",
+      "chain": "Solana",
+      "chainIndex": "501",
+      "tokenAddress": "34UtPx3zyYfC5GVqDXWJqLf77BU5Ebb6o3C2XynpKtzL",
+      "source": "GeckoTerminal",
+      "thesis": "geckoterminal live market data shows BABYTROLL on Solana: liquidity $133.7K, 24h volume $878.4K, 24h move -20.3%; ready for policy-gated OKX quote review.",
+      "invalidation": "Invalidate if liquidity drops below threshold, volume collapses, or the OKX quote/policy gate rejects the route.",
+      "confidence": 93,
+      "score": 99,
+      "freshness": "live GeckoTerminal trending snapshot",
+      "metrics": {
+        "priceUsd": 0.001636686947140541,
+        "liquidityUsd": 133729.5088,
+        "volumeUsd": 878416.695316301,
+        "priceChangePct": -20.259,
+        "buyTxCount1h": 5684,
+        "sellTxCount1h": 5074,
+        "freshness_minutes": 10320
+      },
+      "risk": {
+        "level": "low",
+        "verdict": "allow",
+        "reasons": [
+          "price, liquidity, volume, and tx-flow cleared emerging-token preflight"
+        ]
+      },
+      "policy": {
+        "allowed": true,
+        "reasons": [
+          "policy allows capped quote-backed action"
+        ]
+      },
+      "proposedOrder": {
+        "mode": "quote-only",
+        "fromAsset": "USDC",
+        "toAsset": "BABYTROLL",
+        "amountUsd": 25,
+        "slippageBps": 100,
+        "quoteStatus": "not-quoted",
+        "route": "USDC -> BABYTROLL (OKX quote pending)"
+      },
+      "evidence": [
+        {
+          "source": "GeckoTerminal",
+          "skill": "geckoterminal-trending",
+          "summary": "GeckoTerminal trending pool with $133.7K reserve and $878.4K 24h volume.",
+          "timestamp": "2026-05-17T23:34:21.323Z"
+        }
+      ],
+      "category": "trending"
+    },
+    {
+      "id": "geckoterminal:501:ffumd7yknlb49b9spye53zzs9c8hw2pw7heeddtvid8e",
+      "ticketId": "opp_geckoterminal_solanaffumd7",
+      "status": "ready",
+      "action": "quote-buy",
+      "actionLabel": "Prepare quote for COAR",
+      "symbol": "COAR",
+      "name": "COAR / USDC",
+      "chain": "Solana",
+      "chainIndex": "501",
+      "tokenAddress": "FfUMD7YKNLb49B9SPye53ZZS9c8hw2pW7heEDDtViD8E",
+      "source": "GeckoTerminal",
+      "thesis": "geckoterminal live market data shows COAR on Solana: liquidity $270.1K, 24h volume $2.06M, 24h move 31.3%; ready for policy-gated OKX quote review.",
+      "invalidation": "Invalidate if liquidity drops below threshold, volume collapses, or the OKX quote/policy gate rejects the route.",
+      "confidence": 93,
+      "score": 99,
+      "freshness": "live GeckoTerminal trending snapshot",
+      "metrics": {
+        "priceUsd": 0.01013288061204072,
+        "liquidityUsd": 270129.9345,
+        "volumeUsd": 2063155.61546483,
+        "priceChangePct": 31.34,
+        "buyTxCount1h": 14435,
+        "sellTxCount1h": 7230,
+        "freshness_minutes": 6156
+      },
+      "risk": {
+        "level": "low",
+        "verdict": "allow",
+        "reasons": [
+          "price, liquidity, volume, and tx-flow cleared emerging-token preflight"
+        ]
+      },
+      "policy": {
+        "allowed": true,
+        "reasons": [
+          "policy allows capped quote-backed action"
+        ]
+      },
+      "proposedOrder": {
+        "mode": "quote-only",
+        "fromAsset": "USDC",
+        "toAsset": "COAR",
+        "amountUsd": 25,
+        "slippageBps": 100,
+        "quoteStatus": "not-quoted",
+        "route": "USDC -> COAR (OKX quote pending)"
+      },
+      "evidence": [
+        {
+          "source": "GeckoTerminal",
+          "skill": "geckoterminal-trending",
+          "summary": "GeckoTerminal trending pool with $270.1K reserve and $2.06M 24h volume.",
+          "timestamp": "2026-05-17T23:34:21.323Z"
+        }
+      ],
+      "category": "trending"
+    },
+    {
+      "id": "geckoterminal:8453:0xf398631aaecded97003cba4e9ed2a1b30885c863fd328e56029c9da757f2c1f0",
+      "ticketId": "opp_geckoterminal_base0xf39863",
+      "status": "ready",
+      "action": "quote-buy",
+      "actionLabel": "Prepare quote for VT",
+      "symbol": "VT",
+      "name": "VT / WETH",
+      "chain": "Base",
+      "chainIndex": "8453",
+      "tokenAddress": "0xf398631aaecded97003cba4e9ed2a1b30885c863fd328e56029c9da757f2c1f0",
+      "source": "GeckoTerminal",
+      "thesis": "geckoterminal live market data shows VT on Base: liquidity $125.5K, 24h volume $834.1K, 24h move 1012.2%; ready for policy-gated OKX quote review.",
+      "invalidation": "Invalidate if liquidity drops below threshold, volume collapses, or the OKX quote/policy gate rejects the route.",
+      "confidence": 93,
+      "score": 99,
+      "freshness": "live GeckoTerminal trending snapshot",
+      "metrics": {
+        "priceUsd": 0.00000227937721434936,
+        "liquidityUsd": 125484.0262,
+        "volumeUsd": 834076.46222643,
+        "priceChangePct": 1012.237,
+        "buyTxCount1h": 2845,
+        "sellTxCount1h": 4338,
+        "freshness_minutes": 567
+      },
+      "risk": {
+        "level": "low",
+        "verdict": "allow",
+        "reasons": [
+          "price, liquidity, volume, and tx-flow cleared emerging-token preflight"
+        ]
+      },
+      "policy": {
+        "allowed": true,
+        "reasons": [
+          "policy allows capped quote-backed action"
+        ]
+      },
+      "proposedOrder": {
+        "mode": "quote-only",
+        "fromAsset": "USDC",
+        "toAsset": "VT",
+        "amountUsd": 25,
+        "slippageBps": 100,
+        "quoteStatus": "not-quoted",
+        "route": "USDC -> VT (OKX quote pending)"
+      },
+      "evidence": [
+        {
+          "source": "GeckoTerminal",
+          "skill": "geckoterminal-trending",
+          "summary": "GeckoTerminal trending pool with $125.5K reserve and $834.1K 24h volume.",
+          "timestamp": "2026-05-17T23:34:21.325Z"
+        }
+      ],
+      "category": "trending"
+    },
+    {
+      "id": "geckoterminal:8453:0x459083e53e90df24eda99a977df7f2d49d856839049c4da47a662fa6949f53a0",
+      "ticketId": "opp_geckoterminal_base0x459083",
+      "status": "ready",
+      "action": "quote-buy",
+      "actionLabel": "Prepare quote for TMP",
+      "symbol": "TMP",
+      "name": "TMP / WETH",
+      "chain": "Base",
+      "chainIndex": "8453",
+      "tokenAddress": "0x459083e53e90df24eda99a977df7f2d49d856839049c4da47a662fa6949f53a0",
+      "source": "GeckoTerminal",
+      "thesis": "geckoterminal live market data shows TMP on Base: liquidity $92.4K, 24h volume $565.3K, 24h move -35.7%; ready for policy-gated OKX quote review.",
+      "invalidation": "Invalidate if liquidity drops below threshold, volume collapses, or the OKX quote/policy gate rejects the route.",
+      "confidence": 93,
+      "score": 99,
+      "freshness": "live GeckoTerminal trending snapshot",
+      "metrics": {
+        "priceUsd": 0.00000137094647166634,
+        "liquidityUsd": 92446.3714,
+        "volumeUsd": 565326.093171253,
+        "priceChangePct": -35.701,
+        "buyTxCount1h": 1199,
+        "sellTxCount1h": 1936,
+        "freshness_minutes": 1768
+      },
+      "risk": {
+        "level": "low",
+        "verdict": "allow",
+        "reasons": [
+          "price, liquidity, volume, and tx-flow cleared emerging-token preflight"
+        ]
+      },
+      "policy": {
+        "allowed": true,
+        "reasons": [
+          "policy allows capped quote-backed action"
+        ]
+      },
+      "proposedOrder": {
+        "mode": "quote-only",
+        "fromAsset": "USDC",
+        "toAsset": "TMP",
+        "amountUsd": 25,
+        "slippageBps": 100,
+        "quoteStatus": "not-quoted",
+        "route": "USDC -> TMP (OKX quote pending)"
+      },
+      "evidence": [
+        {
+          "source": "GeckoTerminal",
+          "skill": "geckoterminal-trending",
+          "summary": "GeckoTerminal trending pool with $92.4K reserve and $565.3K 24h volume.",
+          "timestamp": "2026-05-17T23:34:21.325Z"
+        }
+      ],
+      "category": "trending"
+    },
+    {
+      "id": "geckoterminal:8453:0xf8af5bc77e3e8e39182cfc529d0d7e338cb89d45334eef163c66e55f509f2615",
+      "ticketId": "opp_geckoterminal_base0xf8af5b",
+      "status": "ready",
+      "action": "quote-buy",
+      "actionLabel": "Prepare quote for SMART",
+      "symbol": "SMART",
+      "name": "SMART / WETH 0.01%",
+      "chain": "Base",
+      "chainIndex": "8453",
+      "tokenAddress": "0xf8af5bc77e3e8e39182cfc529d0d7e338cb89d45334eef163c66e55f509f2615",
+      "source": "GeckoTerminal",
+      "thesis": "geckoterminal live market data shows SMART on Base: liquidity $18.3K, 24h volume $6.8K, 24h move 36.0%; ready for policy-gated OKX quote review.",
+      "invalidation": "Invalidate if liquidity drops below threshold, volume collapses, or the OKX quote/policy gate rejects the route.",
+      "confidence": 93,
+      "score": 99,
+      "freshness": "live GeckoTerminal new snapshot",
+      "metrics": {
+        "priceUsd": 1.88335399520024e-7,
+        "liquidityUsd": 18272.502,
+        "volumeUsd": 6767.1058004496,
+        "priceChangePct": 36.024,
+        "buyTxCount1h": 36,
+        "sellTxCount1h": 10,
+        "freshness_minutes": 7
+      },
+      "risk": {
+        "level": "low",
+        "verdict": "allow",
+        "reasons": [
+          "price, liquidity, volume, and tx-flow cleared emerging-token preflight"
+        ]
+      },
+      "policy": {
+        "allowed": true,
+        "reasons": [
+          "policy allows capped quote-backed action"
+        ]
+      },
+      "proposedOrder": {
+        "mode": "quote-only",
+        "fromAsset": "USDC",
+        "toAsset": "SMART",
+        "amountUsd": 25,
+        "slippageBps": 100,
+        "quoteStatus": "not-quoted",
+        "route": "USDC -> SMART (OKX quote pending)"
+      },
+      "evidence": [
+        {
+          "source": "GeckoTerminal",
+          "skill": "geckoterminal-new",
+          "summary": "GeckoTerminal new pool with $18.3K reserve and $6.8K 24h volume.",
+          "timestamp": "2026-05-17T23:34:21.315Z"
+        }
+      ],
+      "category": "new-launch"
+    },
+    {
+      "id": "geckoterminal:8453:0xfe6b823343135848db720c6717c82b73109333d118db498d5a418af3847e1db9",
+      "ticketId": "opp_geckoterminal_base0xfe6b82",
+      "status": "ready",
+      "action": "quote-buy",
+      "actionLabel": "Prepare quote for SOL",
+      "symbol": "SOL",
+      "name": "SOL / ETH",
+      "chain": "Base",
+      "chainIndex": "8453",
+      "tokenAddress": "0xfe6b823343135848db720c6717c82b73109333d118db498d5a418af3847e1db9",
+      "source": "GeckoTerminal",
+      "thesis": "geckoterminal live market data shows SOL on Base: liquidity $22.2K, 24h volume $29.5K, 24h move -1.20%; ready for policy-gated OKX quote review.",
+      "invalidation": "Invalidate if liquidity drops below threshold, volume collapses, or the OKX quote/policy gate rejects the route.",
+      "confidence": 57,
+      "score": 63,
+      "freshness": "live GeckoTerminal new snapshot",
+      "metrics": {
+        "priceUsd": 0.0000158437557361959,
+        "liquidityUsd": 22153.0285,
+        "volumeUsd": 29527.4470272047,
+        "priceChangePct": -1.196,
+        "buyTxCount1h": 62,
+        "sellTxCount1h": 166,
+        "freshness_minutes": 6
+      },
+      "risk": {
+        "level": "low",
+        "verdict": "allow",
+        "reasons": [
+          "price, liquidity, volume, and tx-flow cleared emerging-token preflight"
+        ]
+      },
+      "policy": {
+        "allowed": true,
+        "reasons": [
+          "policy allows capped quote-backed action"
+        ]
+      },
+      "proposedOrder": {
+        "mode": "quote-only",
+        "fromAsset": "USDC",
+        "toAsset": "SOL",
+        "amountUsd": 25,
+        "slippageBps": 100,
+        "quoteStatus": "not-quoted",
+        "route": "USDC -> SOL (OKX quote pending)"
+      },
+      "evidence": [
+        {
+          "source": "GeckoTerminal",
+          "skill": "geckoterminal-new",
+          "summary": "GeckoTerminal new pool with $22.2K reserve and $29.5K 24h volume.",
+          "timestamp": "2026-05-17T23:34:21.315Z"
+        }
+      ],
+      "category": "blue-chip"
+    },
+    {
+      "id": "geckoterminal:1:0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640",
+      "ticketId": "opp_geckoterminal_eth0x88e6a0c",
+      "status": "ready",
+      "action": "quote-buy",
+      "actionLabel": "Prepare quote for WETH",
+      "symbol": "WETH",
+      "name": "WETH / USDC 0.05%",
+      "chain": "Ethereum",
+      "chainIndex": "1",
+      "tokenAddress": "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640",
+      "source": "GeckoTerminal",
+      "thesis": "geckoterminal live market data shows WETH on Ethereum: liquidity $101.84M, 24h volume $59.24M, 24h move -0.17%; ready for policy-gated OKX quote review.",
+      "invalidation": "Invalidate if liquidity drops below threshold, volume collapses, or the OKX quote/policy gate rejects the route.",
+      "confidence": 1,
+      "score": 1,
+      "freshness": "live GeckoTerminal trending snapshot",
+      "metrics": {
+        "priceUsd": 2173.48827211982,
+        "liquidityUsd": 101838086.6065,
+        "volumeUsd": 59238759.8303196,
+        "priceChangePct": -0.174,
+        "buyTxCount1h": 1313,
+        "sellTxCount1h": 1158,
+        "freshness_minutes": 2304659
+      },
+      "risk": {
+        "level": "low",
+        "verdict": "allow",
+        "reasons": [
+          "price, liquidity, volume, and tx-flow cleared emerging-token preflight"
+        ]
+      },
+      "policy": {
+        "allowed": true,
+        "reasons": [
+          "policy allows capped quote-backed action"
+        ]
+      },
+      "proposedOrder": {
+        "mode": "quote-only",
+        "fromAsset": "USDC",
+        "toAsset": "WETH",
+        "amountUsd": 25,
+        "slippageBps": 100,
+        "quoteStatus": "not-quoted",
+        "route": "USDC -> WETH (OKX quote pending)"
+      },
+      "evidence": [
+        {
+          "source": "GeckoTerminal",
+          "skill": "geckoterminal-trending",
+          "summary": "GeckoTerminal trending pool with $101.84M reserve and $59.24M 24h volume.",
+          "timestamp": "2026-05-17T23:34:21.314Z"
+        }
+      ],
+      "category": "blue-chip"
+    },
+    {
+      "id": "geckoterminal:1:0x4585fe77225b41b697c938b018e2ac67ac5a20c0",
+      "ticketId": "opp_geckoterminal_eth0x4585fe7",
+      "status": "ready",
+      "action": "quote-buy",
+      "actionLabel": "Prepare quote for WBTC",
+      "symbol": "WBTC",
+      "name": "WBTC / WETH 0.05%",
+      "chain": "Ethereum",
+      "chainIndex": "1",
+      "tokenAddress": "0x4585fe77225b41b697c938b018e2ac67ac5a20c0",
+      "source": "GeckoTerminal",
+      "thesis": "geckoterminal live market data shows WBTC on Ethereum: liquidity $53.80M, 24h volume $10.25M, 24h move -0.32%; ready for policy-gated OKX quote review.",
+      "invalidation": "Invalidate if liquidity drops below threshold, volume collapses, or the OKX quote/policy gate rejects the route.",
+      "confidence": 1,
+      "score": 1,
+      "freshness": "live GeckoTerminal trending snapshot",
+      "metrics": {
+        "priceUsd": 77651.8242369136,
+        "liquidityUsd": 53804122.2897,
+        "volumeUsd": 10251555.4675574,
+        "priceChangePct": -0.316,
+        "buyTxCount1h": 599,
+        "sellTxCount1h": 467,
+        "freshness_minutes": 2304658
+      },
+      "risk": {
+        "level": "low",
+        "verdict": "allow",
+        "reasons": [
+          "price, liquidity, volume, and tx-flow cleared emerging-token preflight"
+        ]
+      },
+      "policy": {
+        "allowed": true,
+        "reasons": [
+          "policy allows capped quote-backed action"
+        ]
+      },
+      "proposedOrder": {
+        "mode": "quote-only",
+        "fromAsset": "USDC",
+        "toAsset": "WBTC",
+        "amountUsd": 25,
+        "slippageBps": 100,
+        "quoteStatus": "not-quoted",
+        "route": "USDC -> WBTC (OKX quote pending)"
+      },
+      "evidence": [
+        {
+          "source": "GeckoTerminal",
+          "skill": "geckoterminal-trending",
+          "summary": "GeckoTerminal trending pool with $53.80M reserve and $10.25M 24h volume.",
+          "timestamp": "2026-05-17T23:34:21.314Z"
+        }
+      ],
+      "category": "blue-chip"
+    },
+    {
+      "id": "dexpaprika:1:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+      "ticketId": "opp_dexpaprika_0x0fb0e40cec",
+      "status": "watch",
+      "action": "watch",
+      "actionLabel": "Watch USDC",
+      "symbol": "USDC",
+      "name": "USD Coin",
+      "chain": "Ethereum",
+      "chainIndex": "1",
+      "tokenAddress": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+      "source": "DexPaprika",
+      "thesis": "dexpaprika live market data shows USDC on Ethereum: liquidity $11.87M, 24h volume $75.79M, 24h move 0.00%; needs review before execution.",
+      "invalidation": "Invalidate if liquidity drops below threshold, volume collapses, or the OKX quote/policy gate rejects the route.",
+      "confidence": 1,
+      "score": 1,
+      "freshness": "live DexPaprika top-pool snapshot",
+      "metrics": {
+        "priceUsd": 1.0000002305363198,
+        "liquidityUsd": 11867287.2773524,
+        "volumeUsd": 75789237.74189314,
+        "priceChangePct": 0.0012125682498702235,
+        "buyTxCount1h": 1147,
+        "sellTxCount1h": 1067,
+        "freshness_minutes": 532547
+      },
+      "risk": {
+        "level": "medium",
+        "verdict": "review",
+        "reasons": [
+          "muted 24h price movement"
+        ]
+      },
+      "policy": {
+        "allowed": false,
+        "reasons": [
+          "quote slippage 250 bps exceeds policy 100 bps"
+        ]
+      },
+      "proposedOrder": {
+        "mode": "watch-only",
+        "fromAsset": "USDC",
+        "toAsset": "USDC",
+        "amountUsd": 25,
+        "slippageBps": 250,
+        "quoteStatus": "not-quoted"
+      },
+      "evidence": [
+        {
+          "source": "DexPaprika",
+          "skill": "dexpaprika-pools",
+          "summary": "Uniswap V4 pool live on DexPaprika with $11.87M liquidity, $75.79M 24h volume, 2214 txns.",
+          "timestamp": "2026-05-17T23:34:27.624Z"
+        }
+      ],
+      "category": "blue-chip"
+    },
+    {
+      "id": "dexpaprika:1:0x4c9edd5852cd905f086c759e8383e09bff1e68b3",
+      "ticketId": "opp_dexpaprika_0x63bb22f47c",
+      "status": "watch",
+      "action": "watch",
+      "actionLabel": "Watch USDe",
+      "symbol": "USDe",
+      "name": "USDe",
+      "chain": "Ethereum",
+      "chainIndex": "1",
+      "tokenAddress": "0x4c9edd5852cd905f086c759e8383e09bff1e68b3",
+      "source": "DexPaprika",
+      "thesis": "dexpaprika live market data shows USDe on Ethereum: liquidity $2.86M, 24h volume $11.37M, 24h move -0.02%; needs review before execution.",
+      "invalidation": "Invalidate if liquidity drops below threshold, volume collapses, or the OKX quote/policy gate rejects the route.",
+      "confidence": 1,
+      "score": 1,
+      "freshness": "live DexPaprika top-pool snapshot",
+      "metrics": {
+        "priceUsd": 1.0001437314416508,
+        "liquidityUsd": 2863686.704722864,
+        "volumeUsd": 11374224.268057905,
+        "priceChangePct": -0.015069164444069737,
+        "buyTxCount1h": 73,
+        "sellTxCount1h": 180,
+        "freshness_minutes": 329611
+      },
+      "risk": {
+        "level": "medium",
+        "verdict": "review",
+        "reasons": [
+          "muted 24h price movement"
+        ]
+      },
+      "policy": {
+        "allowed": false,
+        "reasons": [
+          "quote slippage 250 bps exceeds policy 100 bps"
+        ]
+      },
+      "proposedOrder": {
+        "mode": "watch-only",
+        "fromAsset": "USDC",
+        "toAsset": "USDe",
+        "amountUsd": 25,
+        "slippageBps": 250,
+        "quoteStatus": "not-quoted"
+      },
+      "evidence": [
+        {
+          "source": "DexPaprika",
+          "skill": "dexpaprika-pools",
+          "summary": "Uniswap V4 pool live on DexPaprika with $2.86M liquidity, $11.37M 24h volume, 253 txns.",
+          "timestamp": "2026-05-17T23:34:27.624Z"
+        }
+      ],
+      "category": "blue-chip"
+    },
+    {
+      "id": "dexpaprika:1:0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
+      "ticketId": "opp_dexpaprika_0x4585fe7722",
+      "status": "watch",
+      "action": "watch",
+      "actionLabel": "Watch WBTC",
+      "symbol": "WBTC",
+      "name": "Wrapped BTC",
+      "chain": "Ethereum",
+      "chainIndex": "1",
+      "tokenAddress": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
+      "source": "DexPaprika",
+      "thesis": "dexpaprika live market data shows WBTC on Ethereum: liquidity $53.77M, 24h volume $10.27M, 24h move -0.58%; needs review before execution.",
+      "invalidation": "Invalidate if liquidity drops below threshold, volume collapses, or the OKX quote/policy gate rejects the route.",
+      "confidence": 1,
+      "score": 1,
+      "freshness": "live DexPaprika top-pool snapshot",
+      "metrics": {
+        "priceUsd": 77571.26342225459,
+        "liquidityUsd": 53766024.96861708,
+        "volumeUsd": 10269453.637882013,
+        "priceChangePct": -0.5797562326397088,
+        "buyTxCount1h": 599,
+        "sellTxCount1h": 473,
+        "freshness_minutes": 2646911
+      },
+      "risk": {
+        "level": "medium",
+        "verdict": "review",
+        "reasons": [
+          "muted 24h price movement"
+        ]
+      },
+      "policy": {
+        "allowed": false,
+        "reasons": [
+          "quote slippage 250 bps exceeds policy 100 bps"
+        ]
+      },
+      "proposedOrder": {
+        "mode": "watch-only",
+        "fromAsset": "USDC",
+        "toAsset": "WBTC",
+        "amountUsd": 25,
+        "slippageBps": 250,
+        "quoteStatus": "not-quoted"
+      },
+      "evidence": [
+        {
+          "source": "DexPaprika",
+          "skill": "dexpaprika-pools",
+          "summary": "Uniswap V3 pool live on DexPaprika with $53.77M liquidity, $10.27M 24h volume, 1072 txns.",
+          "timestamp": "2026-05-17T23:34:27.624Z"
+        }
+      ],
+      "category": "blue-chip"
+    },
+    {
+      "id": "dexpaprika:1:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      "ticketId": "opp_dexpaprika_0xc7bbec68d1",
+      "status": "watch",
+      "action": "watch",
+      "actionLabel": "Watch WETH",
+      "symbol": "WETH",
+      "name": "Wrapped Ether",
+      "chain": "Ethereum",
+      "chainIndex": "1",
+      "tokenAddress": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      "source": "DexPaprika",
+      "thesis": "dexpaprika live market data shows WETH on Ethereum: liquidity $5.30M, 24h volume $9.90M, 24h move -0.47%; needs review before execution.",
+      "invalidation": "Invalidate if liquidity drops below threshold, volume collapses, or the OKX quote/policy gate rejects the route.",
+      "confidence": 1,
+      "score": 1,
+      "freshness": "live DexPaprika top-pool snapshot",
+      "metrics": {
+        "priceUsd": 2171.7010087953327,
+        "liquidityUsd": 5300692.95754131,
+        "volumeUsd": 9902643.061264139,
+        "priceChangePct": -0.46538930787961946,
+        "buyTxCount1h": 3950,
+        "sellTxCount1h": 3256,
+        "freshness_minutes": 1783857
+      },
+      "risk": {
+        "level": "medium",
+        "verdict": "review",
+        "reasons": [
+          "muted 24h price movement"
+        ]
+      },
+      "policy": {
+        "allowed": false,
+        "reasons": [
+          "quote slippage 250 bps exceeds policy 100 bps"
+        ]
+      },
+      "proposedOrder": {
+        "mode": "watch-only",
+        "fromAsset": "USDC",
+        "toAsset": "WETH",
+        "amountUsd": 25,
+        "slippageBps": 250,
+        "quoteStatus": "not-quoted"
+      },
+      "evidence": [
+        {
+          "source": "DexPaprika",
+          "skill": "dexpaprika-pools",
+          "summary": "Uniswap V3 pool live on DexPaprika with $5.30M liquidity, $9.90M 24h volume, 7206 txns.",
+          "timestamp": "2026-05-17T23:34:27.624Z"
+        }
+      ],
+      "category": "blue-chip"
+    },
+    {
+      "id": "dexpaprika:501:so11111111111111111111111111111111111111112",
+      "ticketId": "opp_dexpaprika_czfq3xzzdmsd",
+      "status": "watch",
+      "action": "watch",
+      "actionLabel": "Watch SOL",
+      "symbol": "SOL",
+      "name": "Wrapped SOL",
+      "chain": "Solana",
+      "chainIndex": "501",
+      "tokenAddress": "So11111111111111111111111111111111111111112",
+      "source": "DexPaprika",
+      "thesis": "dexpaprika live market data shows SOL on Solana: liquidity $28.61M, 24h volume $47.02M, 24h move -0.86%; needs review before execution.",
+      "invalidation": "Invalidate if liquidity drops below threshold, volume collapses, or the OKX quote/policy gate rejects the route.",
+      "confidence": 1,
+      "score": 1,
+      "freshness": "live DexPaprika top-pool snapshot",
+      "metrics": {
+        "priceUsd": 85.84698105898858,
+        "liquidityUsd": 28610413.89642376,
+        "volumeUsd": 47024552.81797884,
+        "priceChangePct": -0.8606716982978673,
+        "buyTxCount1h": 12425,
+        "sellTxCount1h": 10321,
+        "freshness_minutes": 1515913
+      },
+      "risk": {
+        "level": "medium",
+        "verdict": "review",
+        "reasons": [
+          "muted 24h price movement"
+        ]
+      },
+      "policy": {
+        "allowed": false,
+        "reasons": [
+          "quote slippage 250 bps exceeds policy 100 bps"
+        ]
+      },
+      "proposedOrder": {
+        "mode": "watch-only",
+        "fromAsset": "USDC",
+        "toAsset": "SOL",
+        "amountUsd": 25,
+        "slippageBps": 250,
+        "quoteStatus": "not-quoted"
+      },
+      "evidence": [
+        {
+          "source": "DexPaprika",
+          "skill": "dexpaprika-pools",
+          "summary": "Orca pool live on DexPaprika with $28.61M liquidity, $47.02M 24h volume, 22746 txns.",
+          "timestamp": "2026-05-17T23:34:27.619Z"
+        }
+      ],
+      "category": "blue-chip"
+    },
+    {
+      "id": "dexpaprika:8453:0x4200000000000000000000000000000000000006",
+      "ticketId": "opp_dexpaprika_0xb2cc224c1c",
+      "status": "watch",
+      "action": "watch",
+      "actionLabel": "Watch WETH",
+      "symbol": "WETH",
+      "name": "Wrapped Ether",
+      "chain": "Base",
+      "chainIndex": "8453",
+      "tokenAddress": "0x4200000000000000000000000000000000000006",
+      "source": "DexPaprika",
+      "thesis": "dexpaprika live market data shows WETH on Base: liquidity $19.66M, 24h volume $89.35M, 24h move -0.46%; needs review before execution.",
+      "invalidation": "Invalidate if liquidity drops below threshold, volume collapses, or the OKX quote/policy gate rejects the route.",
+      "confidence": 1,
+      "score": 1,
+      "freshness": "live DexPaprika top-pool snapshot",
+      "metrics": {
+        "priceUsd": 2171.654504991148,
+        "liquidityUsd": 19657973.094063714,
+        "volumeUsd": 89350821.67350075,
+        "priceChangePct": -0.4565191797190329,
+        "buyTxCount1h": 10619,
+        "sellTxCount1h": 10003,
+        "freshness_minutes": 1074529
+      },
+      "risk": {
+        "level": "medium",
+        "verdict": "review",
+        "reasons": [
+          "muted 24h price movement"
+        ]
+      },
+      "policy": {
+        "allowed": false,
+        "reasons": [
+          "quote slippage 250 bps exceeds policy 100 bps"
+        ]
+      },
+      "proposedOrder": {
+        "mode": "watch-only",
+        "fromAsset": "USDC",
+        "toAsset": "WETH",
+        "amountUsd": 25,
+        "slippageBps": 250,
+        "quoteStatus": "not-quoted"
+      },
+      "evidence": [
+        {
+          "source": "DexPaprika",
+          "skill": "dexpaprika-pools",
+          "summary": "Aerodrome SlipStream pool live on DexPaprika with $19.66M liquidity, $89.35M 24h volume, 20622 txns.",
+          "timestamp": "2026-05-17T23:34:28.006Z"
+        }
+      ],
+      "category": "blue-chip"
+    },
+    {
+      "id": "dexpaprika:8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "ticketId": "opp_dexpaprika_0x4e962bb388",
+      "status": "watch",
+      "action": "watch",
+      "actionLabel": "Watch USDC",
+      "symbol": "USDC",
+      "name": "USD Coin",
+      "chain": "Base",
+      "chainIndex": "8453",
+      "tokenAddress": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "source": "DexPaprika",
+      "thesis": "dexpaprika live market data shows USDC on Base: liquidity $13.34M, 24h volume $64.84M, 24h move -0.05%; needs review before execution.",
+      "invalidation": "Invalidate if liquidity drops below threshold, volume collapses, or the OKX quote/policy gate rejects the route.",
+      "confidence": 1,
+      "score": 1,
+      "freshness": "live DexPaprika top-pool snapshot",
+      "metrics": {
+        "priceUsd": 0.9997777129141712,
+        "liquidityUsd": 13337923.968604542,
+        "volumeUsd": 64838962.27854735,
+        "priceChangePct": -0.0536945835659672,
+        "buyTxCount1h": 8878,
+        "sellTxCount1h": 9745,
+        "freshness_minutes": 892940
+      },
+      "risk": {
+        "level": "medium",
+        "verdict": "review",
+        "reasons": [
+          "muted 24h price movement"
+        ]
+      },
+      "policy": {
+        "allowed": false,
+        "reasons": [
+          "quote slippage 250 bps exceeds policy 100 bps"
+        ]
+      },
+      "proposedOrder": {
+        "mode": "watch-only",
+        "fromAsset": "USDC",
+        "toAsset": "USDC",
+        "amountUsd": 25,
+        "slippageBps": 250,
+        "quoteStatus": "not-quoted"
+      },
+      "evidence": [
+        {
+          "source": "DexPaprika",
+          "skill": "dexpaprika-pools",
+          "summary": "Aerodrome SlipStream pool live on DexPaprika with $13.34M liquidity, $64.84M 24h volume, 18623 txns.",
+          "timestamp": "2026-05-17T23:34:28.006Z"
+        }
+      ],
+      "category": "blue-chip"
+    }
+  ],
+  "clusters": [
+    {
+      "cluster_id": "cluster:ethereum:awf",
+      "symbol": "AWF",
+      "chain": "Ethereum",
+      "primary_address": "0x08368cfb1b69f5821ec0e8340bee726568f8d662",
+      "addresses": [
+        "0x08368cfb1b69f5821ec0e8340bee726568f8d662"
+      ],
+      "pool_count": 1,
+      "contract_count": 1,
+      "aggregated_metrics": {
+        "priceUsd": 0.00613227578432565,
+        "liquidityUsd": 186835.2458,
+        "volumeUsd": 1790517.98446224,
+        "priceChangePct": 332.038,
+        "buyTxCount1h": 1989,
+        "sellTxCount1h": 1689,
+        "freshness_minutes": 8135
+      },
+      "top_evidence": [
+        {
+          "source": "GeckoTerminal",
+          "skill": "geckoterminal-trending",
+          "summary": "GeckoTerminal trending pool with $186.8K reserve and $1.79M 24h volume.",
+          "timestamp": "2026-05-17T23:34:21.314Z"
+        },
+        {
+          "source": "candidate-cluster",
+          "skill": "candidate-cluster",
+          "summary": "1 pools / 1 contracts (worst-risk: price, liquidity, volume, and tx-flow cleared emerging-token preflight)",
+          "timestamp": "2026-05-17T23:34:30.717Z"
+        }
+      ],
+      "risk": {
+        "level": "medium",
+        "verdict": "review",
+        "reasons": [
+          "price, liquidity, volume, and tx-flow cleared emerging-token preflight",
+          "missing OKX or wallet evidence",
+          "quote status is not-quoted"
+        ]
+      },
+      "policy": {
+        "allowed": true,
+        "reasons": [
+          "policy allows capped quote-backed action"
+        ]
+      },
+      "status": "watch",
+      "score": 60,
+      "category": "trending",
+      "sourceMode_hint": "live-scout",
+      "member_ids": [
+        "geckoterminal:1:0x08368cfb1b69f5821ec0e8340bee726568f8d662"
+      ],
+      "quoteStatus": "not-quoted",
+      "proposedOrder": {
+        "mode": "watch-only",
+        "fromAsset": "USDC",
+        "toAsset": "AWF",
+        "amountUsd": 25,
+        "slippageBps": 100,
+        "quoteStatus": "not-quoted",
+        "route": "USDC -> AWF (OKX quote pending)"
+      },
+      "notReadyReasons": [
+        "missing OKX or wallet evidence",
+        "quote status is not-quoted"
+      ],
+      "actionLabel": "Watch AWF"
+    },
+    {
+      "cluster_id": "cluster:solana:babytroll",
+      "symbol": "BABYTROLL",
+      "chain": "Solana",
+      "primary_address": "34UtPx3zyYfC5GVqDXWJqLf77BU5Ebb6o3C2XynpKtzL",
+      "addresses": [
+        "34UtPx3zyYfC5GVqDXWJqLf77BU5Ebb6o3C2XynpKtzL"
+      ],
+      "pool_count": 1,
+      "contract_count": 1,
+      "aggregated_metrics": {
+        "priceUsd": 0.001636686947140541,
+        "liquidityUsd": 133729.5088,
+        "volumeUsd": 878416.695316301,
+        "priceChangePct": -20.259,
+        "buyTxCount1h": 5684,
+        "sellTxCount1h": 5074,
+        "freshness_minutes": 10320
+      },
+      "top_evidence": [
+        {
+          "source": "GeckoTerminal",
+          "skill": "geckoterminal-trending",
+          "summary": "GeckoTerminal trending pool with $133.7K reserve and $878.4K 24h volume.",
+          "timestamp": "2026-05-17T23:34:21.323Z"
+        },
+        {
+          "source": "candidate-cluster",
+          "skill": "candidate-cluster",
+          "summary": "1 pools / 1 contracts (worst-risk: price, liquidity, volume, and tx-flow cleared emerging-token preflight)",
+          "timestamp": "2026-05-17T23:34:30.718Z"
+        }
+      ],
+      "risk": {
+        "level": "medium",
+        "verdict": "review",
+        "reasons": [
+          "price, liquidity, volume, and tx-flow cleared emerging-token preflight",
+          "missing OKX or wallet evidence",
+          "quote status is not-quoted"
+        ]
+      },
+      "policy": {
+        "allowed": true,
+        "reasons": [
+          "policy allows capped quote-backed action"
+        ]
+      },
+      "status": "watch",
+      "score": 60,
+      "category": "trending",
+      "sourceMode_hint": "live-scout",
+      "member_ids": [
+        "geckoterminal:501:34utpx3zyyfc5gvqdxwjqlf77bu5ebb6o3c2xynpktzl"
+      ],
+      "quoteStatus": "not-quoted",
+      "proposedOrder": {
+        "mode": "watch-only",
+        "fromAsset": "USDC",
+        "toAsset": "BABYTROLL",
+        "amountUsd": 25,
+        "slippageBps": 100,
+        "quoteStatus": "not-quoted",
+        "route": "USDC -> BABYTROLL (OKX quote pending)"
+      },
+      "notReadyReasons": [
+        "missing OKX or wallet evidence",
+        "quote status is not-quoted"
+      ],
+      "actionLabel": "Watch BABYTROLL"
+    },
+    {
+      "cluster_id": "cluster:solana:coar",
+      "symbol": "COAR",
+      "chain": "Solana",
+      "primary_address": "FfUMD7YKNLb49B9SPye53ZZS9c8hw2pW7heEDDtViD8E",
+      "addresses": [
+        "FfUMD7YKNLb49B9SPye53ZZS9c8hw2pW7heEDDtViD8E"
+      ],
+      "pool_count": 1,
+      "contract_count": 1,
+      "aggregated_metrics": {
+        "priceUsd": 0.01013288061204072,
+        "liquidityUsd": 270129.9345,
+        "volumeUsd": 2063155.61546483,
+        "priceChangePct": 31.34,
+        "buyTxCount1h": 14435,
+        "sellTxCount1h": 7230,
+        "freshness_minutes": 6156
+      },
+      "top_evidence": [
+        {
+          "source": "GeckoTerminal",
+          "skill": "geckoterminal-trending",
+          "summary": "GeckoTerminal trending pool with $270.1K reserve and $2.06M 24h volume.",
+          "timestamp": "2026-05-17T23:34:21.323Z"
+        },
+        {
+          "source": "candidate-cluster",
+          "skill": "candidate-cluster",
+          "summary": "1 pools / 1 contracts (worst-risk: price, liquidity, volume, and tx-flow cleared emerging-token preflight)",
+          "timestamp": "2026-05-17T23:34:30.718Z"
+        }
+      ],
+      "risk": {
+        "level": "medium",
+        "verdict": "review",
+        "reasons": [
+          "price, liquidity, volume, and tx-flow cleared emerging-token preflight",
+          "missing OKX or wallet evidence",
+          "quote status is not-quoted"
+        ]
+      },
+      "policy": {
+        "allowed": true,
+        "reasons": [
+          "policy allows capped quote-backed action"
+        ]
+      },
+      "status": "watch",
+      "score": 60,
+      "category": "trending",
+      "sourceMode_hint": "live-scout",
+      "member_ids": [
+        "geckoterminal:501:ffumd7yknlb49b9spye53zzs9c8hw2pw7heeddtvid8e"
+      ],
+      "quoteStatus": "not-quoted",
+      "proposedOrder": {
+        "mode": "watch-only",
+        "fromAsset": "USDC",
+        "toAsset": "COAR",
+        "amountUsd": 25,
+        "slippageBps": 100,
+        "quoteStatus": "not-quoted",
+        "route": "USDC -> COAR (OKX quote pending)"
+      },
+      "notReadyReasons": [
+        "missing OKX or wallet evidence",
+        "quote status is not-quoted"
+      ],
+      "actionLabel": "Watch COAR"
+    },
+    {
+      "cluster_id": "cluster:solana:cryptocrat",
+      "symbol": "CRYPTOCRAT",
+      "chain": "Solana",
+      "primary_address": "BhBDxSh74dUgVbDZ78866o9UiPfjcX6n7zBSGPC97ttz",
+      "addresses": [
+        "BhBDxSh74dUgVbDZ78866o9UiPfjcX6n7zBSGPC97ttz"
+      ],
+      "pool_count": 1,
+      "contract_count": 1,
+      "aggregated_metrics": {
+        "priceUsd": 0.00003541202697651484,
+        "liquidityUsd": 18551.5378,
+        "volumeUsd": 550388.917175565,
+        "priceChangePct": -63.883,
+        "buyTxCount1h": 6068,
+        "sellTxCount1h": 5157,
+        "freshness_minutes": 1954
+      },
+      "top_evidence": [
+        {
+          "source": "GeckoTerminal",
+          "skill": "geckoterminal-trending",
+          "summary": "GeckoTerminal trending pool with $18.6K reserve and $550.4K 24h volume.",
+          "timestamp": "2026-05-17T23:34:21.323Z"
+        },
+        {
+          "source": "candidate-cluster",
+          "skill": "candidate-cluster",
+          "summary": "1 pools / 1 contracts (worst-risk: price, liquidity, volume, and tx-flow cleared emerging-token preflight)",
+          "timestamp": "2026-05-17T23:34:30.718Z"
+        }
+      ],
+      "risk": {
+        "level": "medium",
+        "verdict": "review",
+        "reasons": [
+          "price, liquidity, volume, and tx-flow cleared emerging-token preflight",
+          "missing OKX or wallet evidence",
+          "quote status is not-quoted"
+        ]
+      },
+      "policy": {
+        "allowed": true,
+        "reasons": [
+          "policy allows capped quote-backed action"
+        ]
+      },
+      "status": "watch",
+      "score": 60,
+      "category": "trending",
+      "sourceMode_hint": "live-scout",
+      "member_ids": [
+        "geckoterminal:501:bhbdxsh74dugvbdz78866o9uipfjcx6n7zbsgpc97ttz"
+      ],
+      "quoteStatus": "not-quoted",
+      "proposedOrder": {
+        "mode": "watch-only",
+        "fromAsset": "USDC",
+        "toAsset": "CRYPTOCRAT",
+        "amountUsd": 25,
+        "slippageBps": 100,
+        "quoteStatus": "not-quoted",
+        "route": "USDC -> CRYPTOCRAT (OKX quote pending)"
+      },
+      "notReadyReasons": [
+        "missing OKX or wallet evidence",
+        "quote status is not-quoted"
+      ],
+      "actionLabel": "Watch CRYPTOCRAT"
+    },
+    {
+      "cluster_id": "cluster:ethereum:hyki",
+      "symbol": "HYKI",
+      "chain": "Ethereum",
+      "primary_address": "0x023789ceb81239da1fee20962f03df37e78bec716604f10456726e8a704daf23",
+      "addresses": [
+        "0x023789ceb81239da1fee20962f03df37e78bec716604f10456726e8a704daf23"
+      ],
+      "pool_count": 1,
+      "contract_count": 1,
+      "aggregated_metrics": {
+        "priceUsd": 26.067688587333,
+        "liquidityUsd": 25671.891,
+        "volumeUsd": 2603.8305132884,
+        "priceChangePct": 19.324,
+        "buyTxCount1h": 19,
+        "sellTxCount1h": 2,
+        "freshness_minutes": 24
+      },
+      "top_evidence": [
+        {
+          "source": "GeckoTerminal",
+          "skill": "geckoterminal-new",
+          "summary": "GeckoTerminal new pool with $25.7K reserve and $2.6K 24h volume.",
+          "timestamp": "2026-05-17T23:34:21.321Z"
+        },
+        {
+          "source": "candidate-cluster",
+          "skill": "candidate-cluster",
+          "summary": "1 pools / 1 contracts (worst-risk: price, liquidity, volume, and tx-flow cleared emerging-token preflight)",
+          "timestamp": "2026-05-17T23:34:30.718Z"
+        }
+      ],
+      "risk": {
+        "level": "medium",
+        "verdict": "review",
+        "reasons": [
+          "price, liquidity, volume, and tx-flow cleared emerging-token preflight",
+          "missing OKX or wallet evidence",
+          "quote status is not-quoted"
+        ]
+      },
+      "policy": {
+        "allowed": true,
+        "reasons": [
+          "policy allows capped quote-backed action"
+        ]
+      },
+      "status": "watch",
+      "score": 60,
+      "category": "new-launch",
+      "sourceMode_hint": "live-scout",
+      "member_ids": [
+        "geckoterminal:1:0x023789ceb81239da1fee20962f03df37e78bec716604f10456726e8a704daf23"
+      ],
+      "quoteStatus": "not-quoted",
+      "proposedOrder": {
+        "mode": "watch-only",
+        "fromAsset": "USDC",
+        "toAsset": "HYKI",
+        "amountUsd": 25,
+        "slippageBps": 100,
+        "quoteStatus": "not-quoted",
+        "route": "USDC -> HYKI (OKX quote pending)"
+      },
+      "notReadyReasons": [
+        "missing OKX or wallet evidence",
+        "quote status is not-quoted"
+      ],
+      "actionLabel": "Watch HYKI"
+    },
+    {
+      "cluster_id": "cluster:ethereum:k9",
+      "symbol": "K9",
+      "chain": "Ethereum",
+      "primary_address": "0x742cd307398a7340e68080417b4dcf50976bc872",
+      "addresses": [
+        "0x742cd307398a7340e68080417b4dcf50976bc872"
+      ],
+      "pool_count": 1,
+      "contract_count": 1,
+      "aggregated_metrics": {
+        "priceUsd": 0.000331248707957365,
+        "liquidityUsd": 34444.5727,
+        "volumeUsd": 116260.91213303,
+        "priceChangePct": 20.642,
+        "buyTxCount1h": 479,
+        "sellTxCount1h": 382,
+        "freshness_minutes": 77803
+      },
+      "top_evidence": [
+        {
+          "source": "GeckoTerminal",
+          "skill": "geckoterminal-trending",
+          "summary": "GeckoTerminal trending pool with $34.4K reserve and $116.3K 24h volume.",
+          "timestamp": "2026-05-17T23:34:21.314Z"
+        },
+        {
+          "source": "candidate-cluster",
+          "skill": "candidate-cluster",
+          "summary": "1 pools / 1 contracts (worst-risk: price, liquidity, volume, and tx-flow cleared emerging-token preflight)",
+          "timestamp": "2026-05-17T23:34:30.718Z"
+        }
+      ],
+      "risk": {
+        "level": "medium",
+        "verdict": "review",
+        "reasons": [
+          "price, liquidity, volume, and tx-flow cleared emerging-token preflight",
+          "missing OKX or wallet evidence",
+          "quote status is not-quoted"
+        ]
+      },
+      "policy": {
+        "allowed": true,
+        "reasons": [
+          "policy allows capped quote-backed action"
+        ]
+      },
+      "status": "watch",
+      "score": 60,
+      "category": "trending",
+      "sourceMode_hint": "live-scout",
+      "member_ids": [
+        "geckoterminal:1:0x742cd307398a7340e68080417b4dcf50976bc872"
+      ],
+      "quoteStatus": "not-quoted",
+      "proposedOrder": {
+        "mode": "watch-only",
+        "fromAsset": "USDC",
+        "toAsset": "K9",
+        "amountUsd": 25,
+        "slippageBps": 100,
+        "quoteStatus": "not-quoted",
+        "route": "USDC -> K9 (OKX quote pending)"
+      },
+      "notReadyReasons": [
+        "missing OKX or wallet evidence",
+        "quote status is not-quoted"
+      ],
+      "actionLabel": "Watch K9"
+    },
+    {
+      "cluster_id": "cluster:ethereum:kirschl",
+      "symbol": "KIRSCHL",
+      "chain": "Ethereum",
+      "primary_address": "0x00792c390d61d2ad2dbaa82f5326c297367133b3",
+      "addresses": [
+        "0x00792c390d61d2ad2dbaa82f5326c297367133b3"
+      ],
+      "pool_count": 1,
+      "contract_count": 1,
+      "aggregated_metrics": {
+        "priceUsd": 1.06560293691651e-11,
+        "liquidityUsd": 11067.73,
+        "volumeUsd": 3133.044671287,
+        "priceChangePct": 262.781,
+        "buyTxCount1h": 20,
+        "sellTxCount1h": 2,
+        "freshness_minutes": 38
+      },
+      "top_evidence": [
+        {
+          "source": "GeckoTerminal",
+          "skill": "geckoterminal-new",
+          "summary": "GeckoTerminal new pool with $11.1K reserve and $3.1K 24h volume.",
+          "timestamp": "2026-05-17T23:34:21.321Z"
+        },
+        {
+          "source": "candidate-cluster",
+          "skill": "candidate-cluster",
+          "summary": "1 pools / 1 contracts (worst-risk: price, liquidity, volume, and tx-flow cleared emerging-token preflight)",
+          "timestamp": "2026-05-17T23:34:30.718Z"
+        }
+      ],
+      "risk": {
+        "level": "medium",
+        "verdict": "review",
+        "reasons": [
+          "price, liquidity, volume, and tx-flow cleared emerging-token preflight",
+          "missing OKX or wallet evidence",
+          "quote status is not-quoted"
+        ]
+      },
+      "policy": {
+        "allowed": true,
+        "reasons": [
+          "policy allows capped quote-backed action"
+        ]
+      },
+      "status": "watch",
+      "score": 60,
+      "category": "new-launch",
+      "sourceMode_hint": "live-scout",
+      "member_ids": [
+        "geckoterminal:1:0x00792c390d61d2ad2dbaa82f5326c297367133b3"
+      ],
+      "quoteStatus": "not-quoted",
+      "proposedOrder": {
+        "mode": "watch-only",
+        "fromAsset": "USDC",
+        "toAsset": "KIRSCHL",
+        "amountUsd": 25,
+        "slippageBps": 100,
+        "quoteStatus": "not-quoted",
+        "route": "USDC -> KIRSCHL (OKX quote pending)"
+      },
+      "notReadyReasons": [
+        "missing OKX or wallet evidence",
+        "quote status is not-quoted"
+      ],
+      "actionLabel": "Watch KIRSCHL"
+    },
+    {
+      "cluster_id": "cluster:ethereum:openhuman",
+      "symbol": "OPENHUMAN",
+      "chain": "Ethereum",
+      "primary_address": "0xd7e023a3cb86aa099c3b51a52b03900df1a31bc502bfce0a524ca71053b2cef0",
+      "addresses": [
+        "0xd7e023a3cb86aa099c3b51a52b03900df1a31bc502bfce0a524ca71053b2cef0"
+      ],
+      "pool_count": 1,
+      "contract_count": 1,
+      "aggregated_metrics": {
+        "priceUsd": 0.000155186997927617,
+        "liquidityUsd": 34900.7089,
+        "volumeUsd": 109248.263025662,
+        "priceChangePct": 6458.037,
+        "buyTxCount1h": 224,
+        "sellTxCount1h": 66,
+        "freshness_minutes": 25
+      },
+      "top_evidence": [
+        {
+          "source": "GeckoTerminal",
+          "skill": "geckoterminal-new",
+          "summary": "GeckoTerminal new pool with $34.9K reserve and $109.2K 24h volume.",
+          "timestamp": "2026-05-17T23:34:21.321Z"
+        },
+        {
+          "source": "candidate-cluster",
+          "skill": "candidate-cluster",
+          "summary": "1 pools / 1 contracts (worst-risk: price, liquidity, volume, and tx-flow cleared emerging-token preflight)",
+          "timestamp": "2026-05-17T23:34:30.718Z"
+        }
+      ],
+      "risk": {
+        "level": "medium",
+        "verdict": "review",
+        "reasons": [
+          "price, liquidity, volume, and tx-flow cleared emerging-token preflight",
+          "missing OKX or wallet evidence",
+          "quote status is not-quoted"
+        ]
+      },
+      "policy": {
+        "allowed": true,
+        "reasons": [
+          "policy allows capped quote-backed action"
+        ]
+      },
+      "status": "watch",
+      "score": 60,
+      "category": "new-launch",
+      "sourceMode_hint": "live-scout",
+      "member_ids": [
+        "geckoterminal:1:0xd7e023a3cb86aa099c3b51a52b03900df1a31bc502bfce0a524ca71053b2cef0"
+      ],
+      "quoteStatus": "not-quoted",
+      "proposedOrder": {
+        "mode": "watch-only",
+        "fromAsset": "USDC",
+        "toAsset": "OPENHUMAN",
+        "amountUsd": 25,
+        "slippageBps": 100,
+        "quoteStatus": "not-quoted",
+        "route": "USDC -> OPENHUMAN (OKX quote pending)"
+      },
+      "notReadyReasons": [
+        "missing OKX or wallet evidence",
+        "quote status is not-quoted"
+      ],
+      "actionLabel": "Watch OPENHUMAN"
+    },
+    {
+      "cluster_id": "cluster:base:smart",
+      "symbol": "SMART",
+      "chain": "Base",
+      "primary_address": "0xf8af5bc77e3e8e39182cfc529d0d7e338cb89d45334eef163c66e55f509f2615",
+      "addresses": [
+        "0xf8af5bc77e3e8e39182cfc529d0d7e338cb89d45334eef163c66e55f509f2615"
+      ],
+      "pool_count": 1,
+      "contract_count": 1,
+      "aggregated_metrics": {
+        "priceUsd": 1.88335399520024e-7,
+        "liquidityUsd": 18272.502,
+        "volumeUsd": 6767.1058004496,
+        "priceChangePct": 36.024,
+        "buyTxCount1h": 36,
+        "sellTxCount1h": 10,
+        "freshness_minutes": 7
+      },
+      "top_evidence": [
+        {
+          "source": "GeckoTerminal",
+          "skill": "geckoterminal-new",
+          "summary": "GeckoTerminal new pool with $18.3K reserve and $6.8K 24h volume.",
+          "timestamp": "2026-05-17T23:34:21.315Z"
+        },
+        {
+          "source": "candidate-cluster",
+          "skill": "candidate-cluster",
+          "summary": "1 pools / 1 contracts (worst-risk: price, liquidity, volume, and tx-flow cleared emerging-token preflight)",
+          "timestamp": "2026-05-17T23:34:30.718Z"
+        }
+      ],
+      "risk": {
+        "level": "medium",
+        "verdict": "review",
+        "reasons": [
+          "price, liquidity, volume, and tx-flow cleared emerging-token preflight",
+          "missing OKX or wallet evidence",
+          "quote status is not-quoted"
+        ]
+      },
+      "policy": {
+        "allowed": true,
+        "reasons": [
+          "policy allows capped quote-backed action"
+        ]
+      },
+      "status": "watch",
+      "score": 60,
+      "category": "new-launch",
+      "sourceMode_hint": "live-scout",
+      "member_ids": [
+        "geckoterminal:8453:0xf8af5bc77e3e8e39182cfc529d0d7e338cb89d45334eef163c66e55f509f2615"
+      ],
+      "quoteStatus": "not-quoted",
+      "proposedOrder": {
+        "mode": "watch-only",
+        "fromAsset": "USDC",
+        "toAsset": "SMART",
+        "amountUsd": 25,
+        "slippageBps": 100,
+        "quoteStatus": "not-quoted",
+        "route": "USDC -> SMART (OKX quote pending)"
+      },
+      "notReadyReasons": [
+        "missing OKX or wallet evidence",
+        "quote status is not-quoted"
+      ],
+      "actionLabel": "Watch SMART"
+    },
+    {
+      "cluster_id": "cluster:base:sol",
+      "symbol": "SOL",
+      "chain": "Base",
+      "primary_address": "0xfe6b823343135848db720c6717c82b73109333d118db498d5a418af3847e1db9",
+      "addresses": [
+        "0xfe6b823343135848db720c6717c82b73109333d118db498d5a418af3847e1db9"
+      ],
+      "pool_count": 1,
+      "contract_count": 1,
+      "aggregated_metrics": {
+        "priceUsd": 0.0000158437557361959,
+        "liquidityUsd": 22153.0285,
+        "volumeUsd": 29527.4470272047,
+        "priceChangePct": -1.196,
+        "buyTxCount1h": 62,
+        "sellTxCount1h": 166,
+        "freshness_minutes": 6
+      },
+      "top_evidence": [
+        {
+          "source": "GeckoTerminal",
+          "skill": "geckoterminal-new",
+          "summary": "GeckoTerminal new pool with $22.2K reserve and $29.5K 24h volume.",
+          "timestamp": "2026-05-17T23:34:21.315Z"
+        },
+        {
+          "source": "candidate-cluster",
+          "skill": "candidate-cluster",
+          "summary": "1 pools / 1 contracts (worst-risk: price, liquidity, volume, and tx-flow cleared emerging-token preflight)",
+          "timestamp": "2026-05-17T23:34:30.718Z"
+        }
+      ],
+      "risk": {
+        "level": "medium",
+        "verdict": "review",
+        "reasons": [
+          "price, liquidity, volume, and tx-flow cleared emerging-token preflight",
+          "missing OKX or wallet evidence",
+          "quote status is not-quoted"
+        ]
+      },
+      "policy": {
+        "allowed": true,
+        "reasons": [
+          "policy allows capped quote-backed action"
+        ]
+      },
+      "status": "watch",
+      "score": 60,
+      "category": "blue-chip",
+      "sourceMode_hint": "live-scout",
+      "member_ids": [
+        "geckoterminal:8453:0xfe6b823343135848db720c6717c82b73109333d118db498d5a418af3847e1db9"
+      ],
+      "quoteStatus": "not-quoted",
+      "proposedOrder": {
+        "mode": "watch-only",
+        "fromAsset": "USDC",
+        "toAsset": "SOL",
+        "amountUsd": 25,
+        "slippageBps": 100,
+        "quoteStatus": "not-quoted",
+        "route": "USDC -> SOL (OKX quote pending)"
+      },
+      "notReadyReasons": [
+        "missing OKX or wallet evidence",
+        "quote status is not-quoted"
+      ],
+      "actionLabel": "Watch SOL"
+    },
+    {
+      "cluster_id": "cluster:base:tmp",
+      "symbol": "TMP",
+      "chain": "Base",
+      "primary_address": "0x459083e53e90df24eda99a977df7f2d49d856839049c4da47a662fa6949f53a0",
+      "addresses": [
+        "0x459083e53e90df24eda99a977df7f2d49d856839049c4da47a662fa6949f53a0"
+      ],
+      "pool_count": 1,
+      "contract_count": 1,
+      "aggregated_metrics": {
+        "priceUsd": 0.00000137094647166634,
+        "liquidityUsd": 92446.3714,
+        "volumeUsd": 565326.093171253,
+        "priceChangePct": -35.701,
+        "buyTxCount1h": 1199,
+        "sellTxCount1h": 1936,
+        "freshness_minutes": 1768
+      },
+      "top_evidence": [
+        {
+          "source": "GeckoTerminal",
+          "skill": "geckoterminal-trending",
+          "summary": "GeckoTerminal trending pool with $92.4K reserve and $565.3K 24h volume.",
+          "timestamp": "2026-05-17T23:34:21.325Z"
+        },
+        {
+          "source": "candidate-cluster",
+          "skill": "candidate-cluster",
+          "summary": "1 pools / 1 contracts (worst-risk: price, liquidity, volume, and tx-flow cleared emerging-token preflight)",
+          "timestamp": "2026-05-17T23:34:30.718Z"
+        }
+      ],
+      "risk": {
+        "level": "medium",
+        "verdict": "review",
+        "reasons": [
+          "price, liquidity, volume, and tx-flow cleared emerging-token preflight",
+          "missing OKX or wallet evidence",
+          "quote status is not-quoted"
+        ]
+      },
+      "policy": {
+        "allowed": true,
+        "reasons": [
+          "policy allows capped quote-backed action"
+        ]
+      },
+      "status": "watch",
+      "score": 60,
+      "category": "trending",
+      "sourceMode_hint": "live-scout",
+      "member_ids": [
+        "geckoterminal:8453:0x459083e53e90df24eda99a977df7f2d49d856839049c4da47a662fa6949f53a0"
+      ],
+      "quoteStatus": "not-quoted",
+      "proposedOrder": {
+        "mode": "watch-only",
+        "fromAsset": "USDC",
+        "toAsset": "TMP",
+        "amountUsd": 25,
+        "slippageBps": 100,
+        "quoteStatus": "not-quoted",
+        "route": "USDC -> TMP (OKX quote pending)"
+      },
+      "notReadyReasons": [
+        "missing OKX or wallet evidence",
+        "quote status is not-quoted"
+      ],
+      "actionLabel": "Watch TMP"
+    },
+    {
+      "cluster_id": "cluster:ethereum:usduc",
+      "symbol": "USDUC",
+      "chain": "Ethereum",
+      "primary_address": "0x329466a48e9375d67ce826d23489e929216f93e36f5fb39eeaf8fb6fba83bdc9",
+      "addresses": [
+        "0x329466a48e9375d67ce826d23489e929216f93e36f5fb39eeaf8fb6fba83bdc9"
+      ],
+      "pool_count": 1,
+      "contract_count": 1,
+      "aggregated_metrics": {
+        "priceUsd": 0.0000220879874087753,
+        "liquidityUsd": 14833.2952,
+        "volumeUsd": 72878.9926592562,
+        "priceChangePct": 972.12,
+        "buyTxCount1h": 155,
+        "sellTxCount1h": 140,
+        "freshness_minutes": 14
+      },
+      "top_evidence": [
+        {
+          "source": "GeckoTerminal",
+          "skill": "geckoterminal-new",
+          "summary": "GeckoTerminal new pool with $14.8K reserve and $72.9K 24h volume.",
+          "timestamp": "2026-05-17T23:34:21.321Z"
+        },
+        {
+          "source": "candidate-cluster",
+          "skill": "candidate-cluster",
+          "summary": "1 pools / 1 contracts (worst-risk: price, liquidity, volume, and tx-flow cleared emerging-token preflight)",
+          "timestamp": "2026-05-17T23:34:30.718Z"
+        }
+      ],
+      "risk": {
+        "level": "medium",
+        "verdict": "review",
+        "reasons": [
+          "price, liquidity, volume, and tx-flow cleared emerging-token preflight",
+          "missing OKX or wallet evidence",
+          "quote status is not-quoted"
+        ]
+      },
+      "policy": {
+        "allowed": true,
+        "reasons": [
+          "policy allows capped quote-backed action"
+        ]
+      },
+      "status": "watch",
+      "score": 60,
+      "category": "new-launch",
+      "sourceMode_hint": "live-scout",
+      "member_ids": [
+        "geckoterminal:1:0x329466a48e9375d67ce826d23489e929216f93e36f5fb39eeaf8fb6fba83bdc9"
+      ],
+      "quoteStatus": "not-quoted",
+      "proposedOrder": {
+        "mode": "watch-only",
+        "fromAsset": "USDC",
+        "toAsset": "USDUC",
+        "amountUsd": 25,
+        "slippageBps": 100,
+        "quoteStatus": "not-quoted",
+        "route": "USDC -> USDUC (OKX quote pending)"
+      },
+      "notReadyReasons": [
+        "missing OKX or wallet evidence",
+        "quote status is not-quoted"
+      ],
+      "actionLabel": "Watch USDUC"
+    },
+    {
+      "cluster_id": "cluster:base:vt",
+      "symbol": "VT",
+      "chain": "Base",
+      "primary_address": "0xf398631aaecded97003cba4e9ed2a1b30885c863fd328e56029c9da757f2c1f0",
+      "addresses": [
+        "0xf398631aaecded97003cba4e9ed2a1b30885c863fd328e56029c9da757f2c1f0"
+      ],
+      "pool_count": 1,
+      "contract_count": 1,
+      "aggregated_metrics": {
+        "priceUsd": 0.00000227937721434936,
+        "liquidityUsd": 125484.0262,
+        "volumeUsd": 834076.46222643,
+        "priceChangePct": 1012.237,
+        "buyTxCount1h": 2845,
+        "sellTxCount1h": 4338,
+        "freshness_minutes": 567
+      },
+      "top_evidence": [
+        {
+          "source": "GeckoTerminal",
+          "skill": "geckoterminal-trending",
+          "summary": "GeckoTerminal trending pool with $125.5K reserve and $834.1K 24h volume.",
+          "timestamp": "2026-05-17T23:34:21.325Z"
+        },
+        {
+          "source": "candidate-cluster",
+          "skill": "candidate-cluster",
+          "summary": "1 pools / 1 contracts (worst-risk: price, liquidity, volume, and tx-flow cleared emerging-token preflight)",
+          "timestamp": "2026-05-17T23:34:30.718Z"
+        }
+      ],
+      "risk": {
+        "level": "medium",
+        "verdict": "review",
+        "reasons": [
+          "price, liquidity, volume, and tx-flow cleared emerging-token preflight",
+          "missing OKX or wallet evidence",
+          "quote status is not-quoted"
+        ]
+      },
+      "policy": {
+        "allowed": true,
+        "reasons": [
+          "policy allows capped quote-backed action"
+        ]
+      },
+      "status": "watch",
+      "score": 60,
+      "category": "trending",
+      "sourceMode_hint": "live-scout",
+      "member_ids": [
+        "geckoterminal:8453:0xf398631aaecded97003cba4e9ed2a1b30885c863fd328e56029c9da757f2c1f0"
+      ],
+      "quoteStatus": "not-quoted",
+      "proposedOrder": {
+        "mode": "watch-only",
+        "fromAsset": "USDC",
+        "toAsset": "VT",
+        "amountUsd": 25,
+        "slippageBps": 100,
+        "quoteStatus": "not-quoted",
+        "route": "USDC -> VT (OKX quote pending)"
+      },
+      "notReadyReasons": [
+        "missing OKX or wallet evidence",
+        "quote status is not-quoted"
+      ],
+      "actionLabel": "Watch VT"
+    },
+    {
+      "cluster_id": "cluster:solana:sol",
+      "symbol": "SOL",
+      "chain": "Solana",
+      "primary_address": "So11111111111111111111111111111111111111112",
+      "addresses": [
+        "So11111111111111111111111111111111111111112"
+      ],
+      "pool_count": 1,
+      "contract_count": 1,
+      "aggregated_metrics": {
+        "priceUsd": 85.84698105898856,
+        "liquidityUsd": 28610413.89642376,
+        "volumeUsd": 47024552.81797884,
+        "priceChangePct": -0.8606716982978673,
+        "buyTxCount1h": 12425,
+        "sellTxCount1h": 10321,
+        "freshness_minutes": 1515913
+      },
+      "top_evidence": [
+        {
+          "source": "DexPaprika",
+          "skill": "dexpaprika-pools",
+          "summary": "Orca pool live on DexPaprika with $28.61M liquidity, $47.02M 24h volume, 22746 txns.",
+          "timestamp": "2026-05-17T23:34:27.619Z"
+        },
+        {
+          "source": "candidate-cluster",
+          "skill": "candidate-cluster",
+          "summary": "1 pools / 1 contracts (worst-risk: muted 24h price movement)",
+          "timestamp": "2026-05-17T23:34:30.719Z"
+        }
+      ],
+      "risk": {
+        "level": "medium",
+        "verdict": "review",
+        "reasons": [
+          "muted 24h price movement"
+        ]
+      },
+      "policy": {
+        "allowed": false,
+        "reasons": [
+          "quote slippage 250 bps exceeds policy 100 bps"
+        ]
+      },
+      "status": "blocked",
+      "score": 1,
+      "category": "blue-chip",
+      "sourceMode_hint": "live-scout",
+      "member_ids": [
+        "dexpaprika:501:so11111111111111111111111111111111111111112"
+      ],
+      "quoteStatus": "not-quoted",
+      "proposedOrder": {
+        "mode": "watch-only",
+        "fromAsset": "USDC",
+        "toAsset": "SOL",
+        "amountUsd": 25,
+        "slippageBps": 250,
+        "quoteStatus": "not-quoted"
+      },
+      "notReadyReasons": [
+        "status is watch; execution requires a ready cluster",
+        "risk verdict is review",
+        "policy gate is not allowed",
+        "missing OKX or wallet evidence",
+        "quote status is not-quoted"
+      ],
+      "actionLabel": "Investigate risk cluster"
+    },
+    {
+      "cluster_id": "cluster:ethereum:usdc",
+      "symbol": "USDC",
+      "chain": "Ethereum",
+      "primary_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+      "addresses": [
+        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+      ],
+      "pool_count": 1,
+      "contract_count": 1,
+      "aggregated_metrics": {
+        "priceUsd": 1.0000002305363198,
+        "liquidityUsd": 11867287.2773524,
+        "volumeUsd": 75789237.74189314,
+        "priceChangePct": 0.0012125682498702235,
+        "buyTxCount1h": 1147,
+        "sellTxCount1h": 1067,
+        "freshness_minutes": 532547
+      },
+      "top_evidence": [
+        {
+          "source": "DexPaprika",
+          "skill": "dexpaprika-pools",
+          "summary": "Uniswap V4 pool live on DexPaprika with $11.87M liquidity, $75.79M 24h volume, 2214 txns.",
+          "timestamp": "2026-05-17T23:34:27.624Z"
+        },
+        {
+          "source": "candidate-cluster",
+          "skill": "candidate-cluster",
+          "summary": "1 pools / 1 contracts (worst-risk: muted 24h price movement)",
+          "timestamp": "2026-05-17T23:34:30.719Z"
+        }
+      ],
+      "risk": {
+        "level": "medium",
+        "verdict": "review",
+        "reasons": [
+          "muted 24h price movement"
+        ]
+      },
+      "policy": {
+        "allowed": false,
+        "reasons": [
+          "quote slippage 250 bps exceeds policy 100 bps"
+        ]
+      },
+      "status": "blocked",
+      "score": 1,
+      "category": "blue-chip",
+      "sourceMode_hint": "live-scout",
+      "member_ids": [
+        "dexpaprika:1:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+      ],
+      "quoteStatus": "not-quoted",
+      "proposedOrder": {
+        "mode": "watch-only",
+        "fromAsset": "USDC",
+        "toAsset": "USDC",
+        "amountUsd": 25,
+        "slippageBps": 250,
+        "quoteStatus": "not-quoted"
+      },
+      "notReadyReasons": [
+        "status is watch; execution requires a ready cluster",
+        "risk verdict is review",
+        "policy gate is not allowed",
+        "missing OKX or wallet evidence",
+        "quote status is not-quoted"
+      ],
+      "actionLabel": "Investigate risk cluster"
+    },
+    {
+      "cluster_id": "cluster:base:usdc",
+      "symbol": "USDC",
+      "chain": "Base",
+      "primary_address": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "addresses": [
+        "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+      ],
+      "pool_count": 1,
+      "contract_count": 1,
+      "aggregated_metrics": {
+        "priceUsd": 0.9997777129141713,
+        "liquidityUsd": 13337923.968604542,
+        "volumeUsd": 64838962.27854735,
+        "priceChangePct": -0.0536945835659672,
+        "buyTxCount1h": 8878,
+        "sellTxCount1h": 9745,
+        "freshness_minutes": 892940
+      },
+      "top_evidence": [
+        {
+          "source": "DexPaprika",
+          "skill": "dexpaprika-pools",
+          "summary": "Aerodrome SlipStream pool live on DexPaprika with $13.34M liquidity, $64.84M 24h volume, 18623 txns.",
+          "timestamp": "2026-05-17T23:34:28.006Z"
+        },
+        {
+          "source": "candidate-cluster",
+          "skill": "candidate-cluster",
+          "summary": "1 pools / 1 contracts (worst-risk: muted 24h price movement)",
+          "timestamp": "2026-05-17T23:34:30.719Z"
+        }
+      ],
+      "risk": {
+        "level": "medium",
+        "verdict": "review",
+        "reasons": [
+          "muted 24h price movement"
+        ]
+      },
+      "policy": {
+        "allowed": false,
+        "reasons": [
+          "quote slippage 250 bps exceeds policy 100 bps"
+        ]
+      },
+      "status": "blocked",
+      "score": 1,
+      "category": "blue-chip",
+      "sourceMode_hint": "live-scout",
+      "member_ids": [
+        "dexpaprika:8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+      ],
+      "quoteStatus": "not-quoted",
+      "proposedOrder": {
+        "mode": "watch-only",
+        "fromAsset": "USDC",
+        "toAsset": "USDC",
+        "amountUsd": 25,
+        "slippageBps": 250,
+        "quoteStatus": "not-quoted"
+      },
+      "notReadyReasons": [
+        "status is watch; execution requires a ready cluster",
+        "risk verdict is review",
+        "policy gate is not allowed",
+        "missing OKX or wallet evidence",
+        "quote status is not-quoted"
+      ],
+      "actionLabel": "Investigate risk cluster"
+    },
+    {
+      "cluster_id": "cluster:ethereum:usde",
+      "symbol": "USDe",
+      "chain": "Ethereum",
+      "primary_address": "0x4c9edd5852cd905f086c759e8383e09bff1e68b3",
+      "addresses": [
+        "0x4c9edd5852cd905f086c759e8383e09bff1e68b3"
+      ],
+      "pool_count": 1,
+      "contract_count": 1,
+      "aggregated_metrics": {
+        "priceUsd": 1.0001437314416508,
+        "liquidityUsd": 2863686.704722864,
+        "volumeUsd": 11374224.268057905,
+        "priceChangePct": -0.015069164444069737,
+        "buyTxCount1h": 73,
+        "sellTxCount1h": 180,
+        "freshness_minutes": 329611
+      },
+      "top_evidence": [
+        {
+          "source": "DexPaprika",
+          "skill": "dexpaprika-pools",
+          "summary": "Uniswap V4 pool live on DexPaprika with $2.86M liquidity, $11.37M 24h volume, 253 txns.",
+          "timestamp": "2026-05-17T23:34:27.624Z"
+        },
+        {
+          "source": "candidate-cluster",
+          "skill": "candidate-cluster",
+          "summary": "1 pools / 1 contracts (worst-risk: muted 24h price movement)",
+          "timestamp": "2026-05-17T23:34:30.719Z"
+        }
+      ],
+      "risk": {
+        "level": "medium",
+        "verdict": "review",
+        "reasons": [
+          "muted 24h price movement"
+        ]
+      },
+      "policy": {
+        "allowed": false,
+        "reasons": [
+          "quote slippage 250 bps exceeds policy 100 bps"
+        ]
+      },
+      "status": "blocked",
+      "score": 1,
+      "category": "blue-chip",
+      "sourceMode_hint": "live-scout",
+      "member_ids": [
+        "dexpaprika:1:0x4c9edd5852cd905f086c759e8383e09bff1e68b3"
+      ],
+      "quoteStatus": "not-quoted",
+      "proposedOrder": {
+        "mode": "watch-only",
+        "fromAsset": "USDC",
+        "toAsset": "USDe",
+        "amountUsd": 25,
+        "slippageBps": 250,
+        "quoteStatus": "not-quoted"
+      },
+      "notReadyReasons": [
+        "status is watch; execution requires a ready cluster",
+        "risk verdict is review",
+        "policy gate is not allowed",
+        "missing OKX or wallet evidence",
+        "quote status is not-quoted"
+      ],
+      "actionLabel": "Investigate risk cluster"
+    },
+    {
+      "cluster_id": "cluster:ethereum:wbtc",
+      "symbol": "WBTC",
+      "chain": "Ethereum",
+      "primary_address": "0x4585fe77225b41b697c938b018e2ac67ac5a20c0",
+      "addresses": [
+        "0x4585fe77225b41b697c938b018e2ac67ac5a20c0",
+        "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599"
+      ],
+      "pool_count": 2,
+      "contract_count": 2,
+      "aggregated_metrics": {
+        "priceUsd": 77611.55809539715,
+        "liquidityUsd": 107570147.25831708,
+        "volumeUsd": 20521009.105439413,
+        "priceChangePct": -0.4478314100256891,
+        "buyTxCount1h": 1198,
+        "sellTxCount1h": 940,
+        "freshness_minutes": 2304658
+      },
+      "top_evidence": [
+        {
+          "source": "GeckoTerminal",
+          "skill": "geckoterminal-trending",
+          "summary": "GeckoTerminal trending pool with $53.80M reserve and $10.25M 24h volume.",
+          "timestamp": "2026-05-17T23:34:21.314Z"
+        },
+        {
+          "source": "candidate-cluster",
+          "skill": "candidate-cluster",
+          "summary": "2 pools / 2 contracts (worst-risk: price, liquidity, volume, and tx-flow cleared emerging-token preflight)",
+          "timestamp": "2026-05-17T23:34:30.718Z"
+        }
+      ],
+      "risk": {
+        "level": "medium",
+        "verdict": "review",
+        "reasons": [
+          "price, liquidity, volume, and tx-flow cleared emerging-token preflight",
+          "muted 24h price movement"
+        ]
+      },
+      "policy": {
+        "allowed": false,
+        "reasons": [
+          "quote slippage 250 bps exceeds policy 100 bps"
+        ]
+      },
+      "status": "blocked",
+      "score": 1,
+      "category": "blue-chip",
+      "sourceMode_hint": "live-scout",
+      "member_ids": [
+        "geckoterminal:1:0x4585fe77225b41b697c938b018e2ac67ac5a20c0",
+        "dexpaprika:1:0x2260fac5e5542a773aa44fbcfedf7c193bc2c599"
+      ],
+      "quoteStatus": "not-quoted",
+      "proposedOrder": {
+        "mode": "watch-only",
+        "fromAsset": "USDC",
+        "toAsset": "WBTC",
+        "amountUsd": 25,
+        "slippageBps": 100,
+        "quoteStatus": "not-quoted",
+        "route": "USDC -> WBTC (OKX quote pending)"
+      },
+      "notReadyReasons": [
+        "status is watch; execution requires a ready cluster",
+        "risk verdict is review",
+        "policy gate is not allowed",
+        "missing OKX or wallet evidence",
+        "quote status is not-quoted"
+      ],
+      "actionLabel": "Investigate risk cluster"
+    },
+    {
+      "cluster_id": "cluster:ethereum:weth",
+      "symbol": "WETH",
+      "chain": "Ethereum",
+      "primary_address": "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640",
+      "addresses": [
+        "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640",
+        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+      ],
+      "pool_count": 2,
+      "contract_count": 2,
+      "aggregated_metrics": {
+        "priceUsd": 2173.39984723617,
+        "liquidityUsd": 107138779.56404132,
+        "volumeUsd": 69141402.89158374,
+        "priceChangePct": -0.18841649100788085,
+        "buyTxCount1h": 5263,
+        "sellTxCount1h": 4414,
+        "freshness_minutes": 1783857
+      },
+      "top_evidence": [
+        {
+          "source": "GeckoTerminal",
+          "skill": "geckoterminal-trending",
+          "summary": "GeckoTerminal trending pool with $101.84M reserve and $59.24M 24h volume.",
+          "timestamp": "2026-05-17T23:34:21.314Z"
+        },
+        {
+          "source": "candidate-cluster",
+          "skill": "candidate-cluster",
+          "summary": "2 pools / 2 contracts (worst-risk: price, liquidity, volume, and tx-flow cleared emerging-token preflight)",
+          "timestamp": "2026-05-17T23:34:30.718Z"
+        }
+      ],
+      "risk": {
+        "level": "medium",
+        "verdict": "review",
+        "reasons": [
+          "price, liquidity, volume, and tx-flow cleared emerging-token preflight",
+          "muted 24h price movement"
+        ]
+      },
+      "policy": {
+        "allowed": false,
+        "reasons": [
+          "quote slippage 250 bps exceeds policy 100 bps"
+        ]
+      },
+      "status": "blocked",
+      "score": 1,
+      "category": "blue-chip",
+      "sourceMode_hint": "live-scout",
+      "member_ids": [
+        "geckoterminal:1:0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640",
+        "dexpaprika:1:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+      ],
+      "quoteStatus": "not-quoted",
+      "proposedOrder": {
+        "mode": "watch-only",
+        "fromAsset": "USDC",
+        "toAsset": "WETH",
+        "amountUsd": 25,
+        "slippageBps": 100,
+        "quoteStatus": "not-quoted",
+        "route": "USDC -> WETH (OKX quote pending)"
+      },
+      "notReadyReasons": [
+        "status is watch; execution requires a ready cluster",
+        "risk verdict is review",
+        "policy gate is not allowed",
+        "missing OKX or wallet evidence",
+        "quote status is not-quoted"
+      ],
+      "actionLabel": "Investigate risk cluster"
+    },
+    {
+      "cluster_id": "cluster:base:weth",
+      "symbol": "WETH",
+      "chain": "Base",
+      "primary_address": "0x4200000000000000000000000000000000000006",
+      "addresses": [
+        "0x4200000000000000000000000000000000000006"
+      ],
+      "pool_count": 1,
+      "contract_count": 1,
+      "aggregated_metrics": {
+        "priceUsd": 2171.654504991148,
+        "liquidityUsd": 19657973.094063714,
+        "volumeUsd": 89350821.67350075,
+        "priceChangePct": -0.4565191797190329,
+        "buyTxCount1h": 10619,
+        "sellTxCount1h": 10003,
+        "freshness_minutes": 1074529
+      },
+      "top_evidence": [
+        {
+          "source": "DexPaprika",
+          "skill": "dexpaprika-pools",
+          "summary": "Aerodrome SlipStream pool live on DexPaprika with $19.66M liquidity, $89.35M 24h volume, 20622 txns.",
+          "timestamp": "2026-05-17T23:34:28.006Z"
+        },
+        {
+          "source": "candidate-cluster",
+          "skill": "candidate-cluster",
+          "summary": "1 pools / 1 contracts (worst-risk: muted 24h price movement)",
+          "timestamp": "2026-05-17T23:34:30.719Z"
+        }
+      ],
+      "risk": {
+        "level": "medium",
+        "verdict": "review",
+        "reasons": [
+          "muted 24h price movement"
+        ]
+      },
+      "policy": {
+        "allowed": false,
+        "reasons": [
+          "quote slippage 250 bps exceeds policy 100 bps"
+        ]
+      },
+      "status": "blocked",
+      "score": 1,
+      "category": "blue-chip",
+      "sourceMode_hint": "live-scout",
+      "member_ids": [
+        "dexpaprika:8453:0x4200000000000000000000000000000000000006"
+      ],
+      "quoteStatus": "not-quoted",
+      "proposedOrder": {
+        "mode": "watch-only",
+        "fromAsset": "USDC",
+        "toAsset": "WETH",
+        "amountUsd": 25,
+        "slippageBps": 250,
+        "quoteStatus": "not-quoted"
+      },
+      "notReadyReasons": [
+        "status is watch; execution requires a ready cluster",
+        "risk verdict is review",
+        "policy gate is not allowed",
+        "missing OKX or wallet evidence",
+        "quote status is not-quoted"
+      ],
+      "actionLabel": "Investigate risk cluster"
+    }
+  ],
+  "defaultClusterIds": [
+    "cluster:ethereum:awf",
+    "cluster:solana:babytroll",
+    "cluster:solana:coar",
+    "cluster:solana:cryptocrat",
+    "cluster:ethereum:hyki",
+    "cluster:ethereum:k9",
+    "cluster:ethereum:kirschl"
+  ],
+  "sourceHealth": [
+    {
+      "name": "DexScreener",
+      "ok": true,
+      "command": "https://api.dexscreener.com/token-profiles/latest/v1 + https://api.dexscreener.com/token-boosts/latest/v1 + https://api.dexscreener.com/token-boosts/top/v1"
+    },
+    {
+      "name": "GeckoTerminal",
+      "ok": true,
+      "command": "https://api.geckoterminal.com/api/v2/networks/eth/trending_pools | https://api.geckoterminal.com/api/v2/networks/eth/new_pools | https://api.geckoterminal.com/api/v2/networks/solana/trending_pools | https://api.geckoterminal.com/api/v2/networks/solana/new_pools | https://api.geckoterminal.com/api/v2/networks/base/trending_pools | https://api.geckoterminal.com/api/v2/networks/base/new_pools"
+    },
+    {
+      "name": "DexPaprika",
+      "ok": true,
+      "command": "https://api.dexpaprika.com/networks/ethereum/dexes + /pools?limit=20 | https://api.dexpaprika.com/networks/solana/dexes + /pools?limit=20 | https://api.dexpaprika.com/networks/base/dexes + /pools?limit=20"
+    },
+    {
+      "name": "OKX OnchainOS enrichment",
+      "ok": false,
+      "command": "onchainos signal list --chain solana --limit 3",
+      "error": "payment/grace quota gate",
+      "detail": "{\n  \"confirming\": true,\n  \"notifications\": [\n    {\n      \"code\": \"MARKET_API_OLD_USER_POST_GRACE_OVER_QUOTA\",\n      \"data\": {\n        \"payment\": [\n          {\n            \"amount\": \"0.0005\",\n            \"asset\": \"0x[redacted-hex]\",\n            \"chainId\": 196,\n            \"isDefault\": false,\n            \"name\": \"Global Dollar\",\n            \"network\": \"eip155:196\",\n            \"payTo\": \"0x[redacted-hex]\",\n            \"symbol\": \"USDG\"\n          },\n          {\n            \"amount\": \"0.0005\",\n            \"asset\": \"0x[redacted-hex]\",\n            \"chainId\": 196,\n            \"isDefault\": false,\n      "
+    }
+  ]
+}

@@ -1,0 +1,120 @@
+{
+  "mission": {
+    "id": "fixture-mission",
+    "status": "completed",
+    "title": "Reducer fixture",
+    "history": [],
+    "created_at": "2026-05-20T00:00:00.000Z",
+    "updated_at": "2026-05-20T00:00:10.000Z",
+    "mission_mode": "task",
+    "goal_mode": true,
+    "goal_objective": "write the final report"
+  },
+  "cases": [
+    {
+      "name": "cumulative thinking",
+      "events": [
+        {
+          "id": 1,
+          "mission_id": "fixture-mission",
+          "sequence": 1,
+          "event_type": "thinking",
+          "timestamp": "2026-05-20T00:00:01.000Z",
+          "content": "Plan",
+          "metadata": { "done": false }
+        },
+        {
+          "id": 2,
+          "mission_id": "fixture-mission",
+          "sequence": 2,
+          "event_type": "thinking",
+          "timestamp": "2026-05-20T00:00:02.000Z",
+          "content": "Plan then act",
+          "metadata": { "done": true }
+        }
+      ],
+      "expected": [
+        { "kind": "thinking", "content": "Plan then act", "done": true }
+      ]
+    },
+    {
+      "name": "text_op finalize",
+      "events": [
+        {
+          "id": 3,
+          "mission_id": "fixture-mission",
+          "sequence": 3,
+          "event_type": "text_op",
+          "timestamp": "2026-05-20T00:00:03.000Z",
+          "event_id": "bubble-a",
+          "content": "[{\"type\":\"insert\",\"pos\":0,\"text\":\"Hello\"}]",
+          "metadata": { "bubble_id": "bubble-a" }
+        },
+        {
+          "id": 4,
+          "mission_id": "fixture-mission",
+          "sequence": 4,
+          "event_type": "text_op",
+          "timestamp": "2026-05-20T00:00:04.000Z",
+          "event_id": "bubble-a",
+          "content": "[{\"type\":\"replace\",\"range\":[0,5],\"text\":\"Hello world\"},{\"type\":\"finalize\"}]",
+          "metadata": { "bubble_id": "bubble-a" }
+        }
+      ],
+      "expected": [
+        {
+          "kind": "stream",
+          "id": "bubble-a",
+          "content": "Hello world",
+          "done": true
+        }
+      ]
+    },
+    {
+      "name": "duplicate event ids",
+      "events": [
+        {
+          "id": 5,
+          "mission_id": "fixture-mission",
+          "sequence": 5,
+          "event_type": "assistant_message",
+          "timestamp": "2026-05-20T00:00:05.000Z",
+          "event_id": "assistant-dup",
+          "content": "first copy",
+          "metadata": { "success": true }
+        },
+        {
+          "id": 6,
+          "mission_id": "fixture-mission",
+          "sequence": 6,
+          "event_type": "assistant_message",
+          "timestamp": "2026-05-20T00:00:06.000Z",
+          "event_id": "assistant-dup",
+          "content": "second copy",
+          "metadata": { "success": true }
+        }
+      ],
+      "expected": [
+        { "kind": "assistant", "id": "assistant-dup", "content": "first copy" }
+      ]
+    },
+    {
+      "name": "goal deliverable inference",
+      "events": [
+        {
+          "id": 7,
+          "mission_id": "fixture-mission",
+          "sequence": 7,
+          "event_type": "thinking",
+          "timestamp": "2026-05-20T00:00:07.000Z",
+          "event_id": "deliverable-1",
+          "content": "Final deliverable",
+          "metadata": { "done": true, "goal_role": "deliverable" }
+        }
+      ],
+      "expected": [
+        { "kind": "assistant", "content": "Final deliverable", "success": true }
+      ]
+    }
+  ]
+}

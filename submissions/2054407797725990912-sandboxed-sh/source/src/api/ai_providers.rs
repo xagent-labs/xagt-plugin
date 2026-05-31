@@ -1,0 +1,8961 @@
+//! AI Provider management API endpoints.
+//!
+//! Provides endpoints for managing inference providers:
+//! - List providers
+//! - Create provider
+//! - Get provider details
+//! - Update provider
+//! - Delete provider
+//! - Authenticate provider (OAuth flow)
+//! - Set default provider
+//! - Get provider credentials for specific backend (Claude Code)
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+use axum::{
+    extract::{Path as AxumPath, State},
+    http::StatusCode,
+    response::IntoResponse,
+    routing::{delete, get, post, put},
+    Json, Router,
+};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use fs2::FileExt;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::sync::{Arc, LazyLock, Mutex as StdMutex};
+use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
+use tokio::process::Command as TokioCommand;
+use tokio::sync::{mpsc, Mutex as AsyncMutex};
+use tokio::time::{timeout, Duration};
+
+use crate::ai_providers::{AuthMethod, PendingOAuth, ProviderType};
+use crate::util::{
+    env_var_bool, home_dir, internal_error, strip_jsonc_comments, AI_PROVIDERS_PATH,
+};
+
+/// Anthropic OAuth client ID (from opencode-anthropic-auth plugin)
+const ANTHROPIC_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+const ANTHROPIC_CONSOLE_REDIRECT_URI: &str = "https://console.anthropic.com/oauth/code/callback";
+
+/// OpenAI OAuth client ID (Codex OAuth flow)
+const OPENAI_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+const OPENAI_AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
+const OPENAI_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+const OPENAI_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
+const OPENAI_SCOPE: &str = "openid profile email offline_access";
+const OPENAI_TOKEN_EXCHANGE_GRANT: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
+const OPENAI_ID_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:id_token";
+
+/// Returns the OpenAI OAuth redirect URI.
+/// Checks OPENAI_REDIRECT_URI env var first, then falls back to default.
+fn openai_redirect_uri() -> String {
+    std::env::var("OPENAI_REDIRECT_URI").unwrap_or_else(|_| OPENAI_REDIRECT_URI.to_string())
+}
+
+async fn exchange_openai_id_token_for_api_key(
+    client: &reqwest::Client,
+    id_token: &str,
+) -> Result<String, String> {
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("grant_type", OPENAI_TOKEN_EXCHANGE_GRANT)
+        .append_pair("client_id", OPENAI_CLIENT_ID)
+        .append_pair("requested_token", "openai-api-key")
+        .append_pair("subject_token", id_token)
+        .append_pair("subject_token_type", OPENAI_ID_TOKEN_TYPE)
+        .finish();
+
+    let resp = client
+        .post(OPENAI_TOKEN_URL)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to exchange id_token for API key: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        // Provide actionable guidance for the most common failure.
+        if text.contains("missing organization_id") {
+            return Err(
+                "Your OpenAI account does not have an API platform organization. \
+                 Visit https://platform.openai.com to create one (you may need to add a payment method), \
+                 then reconnect the OpenAI provider."
+                    .to_string(),
+            );
+        }
+        return Err(format!(
+            "OpenAI API key exchange failed ({}): {}",
+            status, text
+        ));
+    }
+
+    let data: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse API key exchange response: {}", e))?;
+
+    let api_key = data
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "No access_token in API key exchange response".to_string())?;
+
+    Ok(api_key.to_string())
+}
+
+async fn refresh_openai_oauth_tokens(
+    client: &reqwest::Client,
+    refresh_token: &str,
+) -> Result<(String, String, i64, Option<String>), OAuthRefreshError> {
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("grant_type", "refresh_token")
+        .append_pair("client_id", OPENAI_CLIENT_ID)
+        .append_pair("refresh_token", refresh_token)
+        .finish();
+
+    let resp = client
+        .post(OPENAI_TOKEN_URL)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .await
+        .map_err(|e| {
+            OAuthRefreshError::Other(format!("Failed to refresh OpenAI OAuth token: {}", e))
+        })?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+
+        // Check if the error is invalid_grant (expired/revoked refresh token)
+        if text.contains("invalid_grant") || text.contains("Invalid grant") {
+            return Err(OAuthRefreshError::InvalidGrant(format!(
+                "OpenAI refresh token expired or revoked ({}): {}",
+                status, text
+            )));
+        }
+
+        return Err(OAuthRefreshError::Other(format!(
+            "OpenAI OAuth refresh failed ({}): {}",
+            status, text
+        )));
+    }
+
+    let data: serde_json::Value = resp.json().await.map_err(|e| {
+        OAuthRefreshError::Other(format!("Failed to parse OpenAI refresh response: {}", e))
+    })?;
+
+    let access_token = data
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            OAuthRefreshError::Other("No access_token in OpenAI refresh response".to_string())
+        })?;
+
+    let new_refresh = data
+        .get("refresh_token")
+        .and_then(|v| v.as_str())
+        .unwrap_or(refresh_token);
+
+    let expires_in = data
+        .get("expires_in")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(3600);
+    let expires_at = chrono::Utc::now().timestamp_millis() + (expires_in * 1000);
+
+    let id_token = data
+        .get("id_token")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    Ok((
+        access_token.to_string(),
+        new_refresh.to_string(),
+        expires_at,
+        id_token,
+    ))
+}
+
+/// Try to ensure we have an OpenAI API key available for the Codex CLI.
+///
+/// If an API key is already configured (env, OpenCode auth.json, or ai_providers.json),
+/// this is a no-op.
+///
+/// Otherwise, if OpenAI OAuth credentials exist (refresh token), attempt to:
+/// 1. refresh the OAuth token to obtain an id_token
+/// 2. exchange the id_token for an OpenAI API key (Codex CLI behavior)
+/// 3. store the API key into `.sandboxed-sh/ai_providers.json`
+///
+/// **This function is best-effort.** If the API key exchange fails (e.g. because
+/// the user has no API platform organization), it logs a warning but does NOT
+/// return an error.  The caller should fall back to `auth_mode: "chatgpt"` using
+/// the OAuth access_token directly.
+pub async fn ensure_openai_api_key_for_codex(working_dir: &Path) -> Result<(), String> {
+    if get_openai_api_key_for_codex_default(working_dir).is_some() {
+        return Ok(());
+    }
+
+    let Some(entry) = read_oauth_token_entry(ProviderType::OpenAI) else {
+        return Ok(());
+    };
+    if entry.refresh_token.trim().is_empty() {
+        return Ok(());
+    }
+
+    let client = reqwest::Client::new();
+    let (access, refresh, expires_at, id_token) =
+        refresh_openai_oauth_tokens(&client, &entry.refresh_token).await?;
+
+    // Sync refreshed OAuth tokens so OpenCode and the canonical store stay up to date.
+    let _ = sync_to_opencode_auth(ProviderType::OpenAI, &refresh, &access, expires_at);
+
+    // Also sync to the canonical credential store so write_codex_auth_json_chatgpt can
+    // use the freshly-refreshed tokens.
+    if let Err(e) = write_sandboxed_credential(ProviderType::OpenAI, &refresh, &access, expires_at)
+    {
+        tracing::warn!(
+            "Failed to sync refreshed OpenAI token to credential store: {}",
+            e
+        );
+    }
+
+    let Some(id_token) = id_token else {
+        tracing::warn!(
+            "OpenAI OAuth refresh did not return id_token; will fall back to chatgpt auth mode"
+        );
+        return Ok(());
+    };
+
+    match exchange_openai_id_token_for_api_key(&client, &id_token).await {
+        Ok(api_key) => {
+            upsert_openai_api_key_in_ai_providers(working_dir, &api_key)?;
+        }
+        Err(e) => {
+            // Not fatal – the Codex CLI can run in `auth_mode: "chatgpt"` using
+            // the OAuth access_token directly (no sk-... API key needed).
+            tracing::warn!(
+                "Could not mint OpenAI API key (will use chatgpt auth mode): {}",
+                e
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Google/Gemini OAuth constants (from opencode-gemini-auth plugin / Gemini CLI)
+const GOOGLE_CLIENT_ID: &str =
+    "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com";
+// REDACTED-FOR-ARCHIVE: upstream embedded a public Google OAuth client secret here (well-known
+// Gemini CLI constant). Scrubbed during archive 2026-05-31 to satisfy GitHub secret-scanning push
+// protection. See upstream https://github.com/Th0rgal/sandboxed.sh for the live value.
+const GOOGLE_CLIENT_SECRET: &str = "REDACTED-DURING-ARCHIVE-SEE-UPSTREAM";
+const GOOGLE_AUTHORIZE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
+const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
+const GOOGLE_REDIRECT_URI: &str = "http://localhost:8085/oauth2callback";
+const GOOGLE_SCOPES: &str =
+    "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile";
+const GROK_OAUTH_CLIENT_KEY: &str = "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828";
+const GROK_OAUTH_CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
+
+fn google_client_id() -> &'static str {
+    GOOGLE_CLIENT_ID
+}
+
+fn google_client_secret() -> &'static str {
+    GOOGLE_CLIENT_SECRET
+}
+
+fn grok_auth_path() -> PathBuf {
+    PathBuf::from(home_dir()).join(".grok").join("auth.json")
+}
+
+fn grok_auth_paths() -> Vec<PathBuf> {
+    let mut paths = vec![grok_auth_path()];
+    let service_path = PathBuf::from("/var/lib/opencode/.grok/auth.json");
+    if !paths.iter().any(|path| path == &service_path) {
+        paths.push(service_path);
+    }
+    paths
+}
+
+fn read_grok_auth_entry() -> Option<serde_json::Value> {
+    let contents = std::fs::read_to_string(grok_auth_path()).ok()?;
+    let auth: serde_json::Value = serde_json::from_str(&contents).ok()?;
+    auth.get(GROK_OAUTH_CLIENT_KEY).cloned()
+}
+
+async fn wait_for_grok_auth_entry() -> Option<serde_json::Value> {
+    for attempt in 0..20 {
+        if let Some(entry) = read_grok_auth_entry() {
+            return Some(entry);
+        }
+        if attempt < 19 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+    None
+}
+
+fn grok_auth_email(entry: &serde_json::Value) -> Option<String> {
+    entry
+        .get("email")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.to_string())
+}
+
+fn grok_auth_expires_at_millis(entry: &serde_json::Value) -> i64 {
+    entry
+        .get("expires_at")
+        .and_then(parse_grok_expires_at_value)
+        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis() + 6 * 60 * 60 * 1000)
+}
+
+fn parse_grok_expires_at_value(value: &serde_json::Value) -> Option<i64> {
+    if let Some(expires_at) = value.as_i64() {
+        return Some(expires_at);
+    }
+    let text = value.as_str()?.trim();
+    if let Ok(expires_at) = text.parse::<i64>() {
+        return Some(expires_at);
+    }
+    chrono::DateTime::parse_from_rfc3339(text)
+        .ok()
+        .map(|dt| dt.timestamp_millis())
+}
+
+fn parse_grok_device_auth_line(line: &str) -> (Option<String>, Option<String>) {
+    let trimmed = line
+        .trim()
+        .trim_matches(|c: char| c.is_ascii_control() || c.is_whitespace());
+
+    let auth_url = trimmed
+        .split_whitespace()
+        .find(|part| part.starts_with("https://"))
+        .map(|part| part.trim_end_matches(['.', ',']).to_string());
+
+    let user_code = if let Some(ref url) = auth_url {
+        url::Url::parse(url).ok().and_then(|url| {
+            url.query_pairs()
+                .find(|(key, _)| key == "user_code")
+                .map(|(_, value)| value.to_string())
+        })
+    } else if trimmed.contains('-')
+        && trimmed
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '-')
+    {
+        Some(trimmed.to_string())
+    } else {
+        None
+    };
+
+    (auth_url, user_code)
+}
+
+#[cfg(test)]
+mod grok_oauth_tests {
+    use super::{
+        get_xai_api_key_for_grok, grok_auth_expires_at_millis, parse_grok_device_auth_line,
+    };
+    use crate::ai_providers::{AIProvider, OAuthCredentials, ProviderType};
+
+    #[test]
+    fn parses_device_auth_url_and_user_code_from_stderr_line() {
+        let line = "  https://accounts.x.ai/oauth2/device?user_code=YKRD-M9AF";
+
+        let (url, code) = parse_grok_device_auth_line(line);
+
+        assert_eq!(
+            url.as_deref(),
+            Some("https://accounts.x.ai/oauth2/device?user_code=YKRD-M9AF")
+        );
+        assert_eq!(code.as_deref(), Some("YKRD-M9AF"));
+    }
+
+    #[test]
+    fn parses_standalone_device_code_line() {
+        let (_, code) = parse_grok_device_auth_line("  YKRD-M9AF");
+
+        assert_eq!(code.as_deref(), Some("YKRD-M9AF"));
+    }
+
+    #[test]
+    fn parses_grok_rfc3339_expiry() {
+        let entry = serde_json::json!({
+            "expires_at": "2026-05-19T06:30:31.759077679Z"
+        });
+
+        assert_eq!(grok_auth_expires_at_millis(&entry), 1779172231759);
+    }
+
+    #[test]
+    fn parses_grok_numeric_expiry() {
+        let entry = serde_json::json!({
+            "expires_at": 1779172231759_i64
+        });
+
+        assert_eq!(grok_auth_expires_at_millis(&entry), 1779172231759);
+    }
+
+    #[test]
+    fn grok_credential_lookup_uses_xai_api_key() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store_dir = temp.path().join(".sandboxed-sh");
+        std::fs::create_dir_all(&store_dir).expect("store dir");
+
+        let mut provider = AIProvider::new(ProviderType::Xai, "xAI API".to_string());
+        provider.api_key = Some("xai-api-key".to_string());
+        std::fs::write(
+            store_dir.join("ai_providers.json"),
+            serde_json::to_string(&vec![provider]).expect("serialize providers"),
+        )
+        .expect("write providers");
+
+        assert_eq!(
+            get_xai_api_key_for_grok(temp.path()).as_deref(),
+            Some("xai-api-key")
+        );
+    }
+
+    #[test]
+    fn grok_credential_lookup_does_not_treat_oauth_token_as_api_key() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store_dir = temp.path().join(".sandboxed-sh");
+        std::fs::create_dir_all(&store_dir).expect("store dir");
+
+        let mut provider = AIProvider::new(ProviderType::Xai, "xAI OAuth".to_string());
+        provider.oauth = Some(OAuthCredentials {
+            access_token: "oauth-access-token".to_string(),
+            refresh_token: "refresh-token".to_string(),
+            expires_at: chrono::Utc::now().timestamp_millis() + 60 * 60 * 1000,
+        });
+        std::fs::write(
+            store_dir.join("ai_providers.json"),
+            serde_json::to_string(&vec![provider]).expect("serialize providers"),
+        )
+        .expect("write providers");
+
+        assert_eq!(get_xai_api_key_for_grok(temp.path()), None);
+    }
+}
+
+async fn forward_grok_login_lines<R>(stream: R, sender: mpsc::UnboundedSender<String>)
+where
+    R: AsyncRead + Unpin,
+{
+    let mut lines = BufReader::new(stream).lines();
+    loop {
+        match lines.next_line().await {
+            Ok(Some(line)) => {
+                let _ = sender.send(line);
+            }
+            Ok(None) => break,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed reading Grok login output");
+                break;
+            }
+        }
+    }
+}
+
+async fn start_grok_device_auth() -> Result<(String, String), String> {
+    let mut child = TokioCommand::new("grok")
+        .args(["login", "--device-auth"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to start `grok login --device-auth`: {}", e))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Failed to capture Grok login stdout".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Failed to capture Grok login stderr".to_string())?;
+    let (sender, mut receiver) = mpsc::unbounded_channel();
+    tokio::spawn(forward_grok_login_lines(stdout, sender.clone()));
+    tokio::spawn(forward_grok_login_lines(stderr, sender));
+
+    let mut auth_url: Option<String> = None;
+    let mut user_code: Option<String> = None;
+
+    let auth_result = timeout(Duration::from_secs(15), async {
+        while let Some(line) = receiver.recv().await {
+            let (line_url, line_code) = parse_grok_device_auth_line(&line);
+            if auth_url.is_none() {
+                auth_url = line_url;
+            }
+            if user_code.is_none() {
+                user_code = line_code;
+            }
+            if auth_url.is_some() && user_code.is_some() {
+                break;
+            }
+        }
+        Ok::<(), String>(())
+    })
+    .await;
+
+    if auth_result.is_err() {
+        let _ = child.kill().await;
+        return Err("Timed out waiting for Grok device authorization URL".to_string());
+    }
+    auth_result.map_err(|e| e.to_string())??;
+
+    tokio::spawn(async move {
+        match child.wait().await {
+            Ok(status) if status.success() => {
+                tracing::info!("Grok device authorization completed successfully");
+            }
+            Ok(status) => {
+                tracing::warn!(
+                    ?status,
+                    "Grok device authorization process exited unsuccessfully"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed waiting for Grok device authorization process");
+            }
+        }
+    });
+
+    Ok((
+        auth_url.ok_or_else(|| "Grok did not print a device authorization URL".to_string())?,
+        user_code.ok_or_else(|| "Grok did not print a device authorization code".to_string())?,
+    ))
+}
+
+async fn upsert_grok_oauth_provider(
+    state: &super::routes::AppState,
+    entry: &serde_json::Value,
+    use_for_backends: Option<Vec<String>>,
+    target_id: Option<uuid::Uuid>,
+) -> Result<ProviderResponse, (StatusCode, String)> {
+    let access_token = entry
+        .get("key")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_GATEWAY,
+                "Grok auth file did not include an access token".to_string(),
+            )
+        })?;
+    let refresh_token = entry
+        .get("refresh_token")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_GATEWAY,
+                "Grok auth file did not include a refresh token".to_string(),
+            )
+        })?;
+    let account_email = grok_auth_email(entry);
+    let backends = use_for_backends.unwrap_or_else(|| vec!["grok".to_string()]);
+
+    // When reconnect targets a specific row (UUID), update *that* row so the
+    // health probe checks the same id the user clicked. Otherwise fall back to
+    // the first OAuth row, or create a new one.
+    let existing_xai = state.ai_providers.get_all_by_type(ProviderType::Xai).await;
+    let mut provider = target_id
+        .and_then(|tid| existing_xai.iter().find(|p| p.id == tid).cloned())
+        .or_else(|| existing_xai.iter().find(|p| p.has_oauth()).cloned())
+        .unwrap_or_else(|| {
+            crate::ai_providers::AIProvider::new(
+                ProviderType::Xai,
+                "xAI (Grok Build OAuth)".to_string(),
+            )
+        });
+
+    provider.name = account_email
+        .as_ref()
+        .map(|email| format!("xAI ({email})"))
+        .unwrap_or_else(|| "xAI (Grok Build OAuth)".to_string());
+    provider.account_email = account_email;
+    provider.api_key = None;
+    provider.oauth = Some(crate::ai_providers::OAuthCredentials {
+        refresh_token: refresh_token.to_string(),
+        access_token: access_token.to_string(),
+        expires_at: grok_auth_expires_at_millis(entry),
+    });
+    provider.use_for_backends = Some(backends.clone());
+    provider.enabled = true;
+
+    let stored = if state.ai_providers.get(provider.id).await.is_some() {
+        state.ai_providers.update(provider.id, provider).await
+    } else {
+        let id = state.ai_providers.add(provider).await;
+        state.ai_providers.get(id).await
+    }
+    .ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to save Grok OAuth provider".to_string(),
+        )
+    })?;
+
+    if let Err(e) =
+        update_provider_backends(&state.config.working_dir, ProviderType::Xai.id(), backends)
+    {
+        tracing::error!("Failed to save xAI provider backends: {}", e);
+    }
+    if provider_targets_grok(&stored) {
+        if let Err(e) = state.backend_configs.set_enabled("grok", true).await {
+            tracing::error!(
+                "Failed to enable Grok backend after xAI OAuth connect: {}",
+                e
+            );
+        }
+    }
+    if let Some(ref email) = stored.account_email {
+        if let Err(e) = update_provider_account(
+            &state.config.working_dir,
+            ProviderType::Xai.id(),
+            email.clone(),
+        ) {
+            tracing::error!("Failed to save xAI account email: {}", e);
+        }
+    }
+
+    Ok(build_response_from_store(&stored))
+}
+
+fn provider_targets_grok(provider: &crate::ai_providers::AIProvider) -> bool {
+    provider
+        .use_for_backends
+        .as_ref()
+        .map(|backends| backends.iter().any(|backend| backend == "grok"))
+        .unwrap_or_else(|| {
+            default_backends_for_provider(provider.provider_type)
+                .iter()
+                .any(|backend| backend == "grok")
+        })
+}
+
+fn anthropic_client_id() -> String {
+    ANTHROPIC_CLIENT_ID
+        .strip_prefix("urn:uuid:")
+        .unwrap_or(ANTHROPIC_CLIENT_ID)
+        .to_string()
+}
+
+/// Default localhost port for Claude Max/Pro OAuth callback.
+/// This matches what Claude Code uses. Since there's no server listening,
+/// the user copies the redirect URL from their browser's address bar.
+const ANTHROPIC_MAX_REDIRECT_PORT: u16 = 9876;
+
+fn anthropic_redirect_uri(mode: &str, _client_id: &str) -> String {
+    if mode == "max" {
+        format!("http://localhost:{}/callback", ANTHROPIC_MAX_REDIRECT_PORT)
+    } else {
+        ANTHROPIC_CONSOLE_REDIRECT_URI.to_string()
+    }
+}
+
+fn openai_authorize_url(challenge: &str, state: &str) -> Result<String, String> {
+    let redirect_uri = openai_redirect_uri();
+    let mut url =
+        url::Url::parse(OPENAI_AUTHORIZE_URL).map_err(|e| format!("Failed to parse URL: {}", e))?;
+
+    url.query_pairs_mut()
+        .append_pair("response_type", "code")
+        .append_pair("client_id", OPENAI_CLIENT_ID)
+        .append_pair("redirect_uri", &redirect_uri)
+        .append_pair("scope", OPENAI_SCOPE)
+        .append_pair("code_challenge", challenge)
+        .append_pair("code_challenge_method", "S256")
+        .append_pair("state", state)
+        .append_pair("id_token_add_organizations", "true")
+        .append_pair("codex_cli_simplified_flow", "true")
+        .append_pair("originator", "codex_cli_rs");
+
+    Ok(url.to_string())
+}
+
+fn google_authorize_url(challenge: &str, state: &str) -> Result<String, String> {
+    let mut url =
+        url::Url::parse(GOOGLE_AUTHORIZE_URL).map_err(|e| format!("Failed to parse URL: {}", e))?;
+    let client_id = google_client_id();
+
+    url.query_pairs_mut()
+        .append_pair("client_id", client_id)
+        .append_pair("response_type", "code")
+        .append_pair("redirect_uri", GOOGLE_REDIRECT_URI)
+        .append_pair("scope", GOOGLE_SCOPES)
+        .append_pair("code_challenge", challenge)
+        .append_pair("code_challenge_method", "S256")
+        .append_pair("state", state)
+        .append_pair("access_type", "offline")
+        .append_pair("prompt", "consent");
+
+    Ok(url.to_string())
+}
+
+/// Build [`StandardAccount`] entries for all standard (non-custom) providers
+/// that have credentials in OpenCode's `auth.json` or the local CLI proxy.
+///
+/// These are used by chain resolution to include standard providers alongside
+/// custom providers from `AIProviderStore`.
+pub fn read_standard_accounts(working_dir: &Path) -> Vec<crate::provider_health::StandardAccount> {
+    let config_path = get_opencode_config_path(working_dir);
+    let opencode_config = read_opencode_config(&config_path).unwrap_or_default();
+    let auth = read_opencode_auth().unwrap_or_else(|_| serde_json::json!({}));
+    let auth_obj = auth.as_object();
+
+    let mut accounts = Vec::new();
+    let mut seen_types = std::collections::HashSet::new();
+
+    if let Some(auth_map) = auth_obj {
+        // Iterate over all keys in auth.json.
+        for (key, value) in auth_map {
+            let Some(provider_type) = ProviderType::from_id(key.as_str()) else {
+                continue;
+            };
+            // Skip custom providers — they live in AIProviderStore
+            if provider_type == ProviderType::Custom {
+                continue;
+            }
+            // Extract actual API key from the auth entry.
+            // Check all field name variants for consistency with get_api_key_for_provider.
+            let mut api_key = value
+                .get("key")
+                .or_else(|| value.get("api_key"))
+                .or_else(|| value.get("apiKey"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.to_string());
+            let original_api_key_present = api_key.is_some();
+            let account_has_oauth = value
+                .get("type")
+                .and_then(|v| v.as_str())
+                .map(|t| t == "oauth")
+                .unwrap_or(false)
+                || value
+                    .get("refresh")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| !s.trim().is_empty());
+
+            // Anthropic OAuth entries include an access token that works as a
+            // Bearer credential at `/v1/messages` (with the oauth-2025-04-20
+            // beta header). OpenAI OAuth JWTs look similar but are only valid
+            // against the Codex `/v1/responses` path — `/v1/chat/completions`
+            // rejects them with 401. Don't hoist OpenAI OAuth to `api_key`
+            // or the chain resolver will route to an endpoint that can never
+            // succeed; leave OpenAI OAuth accounts without an `api_key` so
+            // `has_routable_credentials` excludes them from the pool.
+            let mut oauth_expires_at: Option<i64> = None;
+            if api_key.is_none() && account_has_oauth && provider_type == ProviderType::Anthropic {
+                api_key = value
+                    .get("access")
+                    .or_else(|| value.get("access_token"))
+                    .or_else(|| value.get("accessToken"))
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.trim().is_empty())
+                    .map(|s| s.to_string());
+                oauth_expires_at = value
+                    .get("expires")
+                    .or_else(|| value.get("expires_at"))
+                    .and_then(|v| v.as_i64());
+            }
+
+            // `has_oauth` on the resolved account must reflect the credential
+            // we'll actually send, not just whether OAuth info existed in
+            // auth.json. If the user has both an API key and a refresh token
+            // for the same provider, we route with the API key (`x-api-key`),
+            // so `has_oauth=false` to stop the proxy from attaching OAuth-only
+            // Bearer + beta headers. It stays true for hoisted Anthropic OAuth
+            // (api_key was originally None and now holds the access token) and
+            // for Google OAuth-only entries (no api_key; adapter refreshes
+            // from auth.json at request time).
+            let has_oauth = account_has_oauth && !original_api_key_present;
+
+            // Only include accounts that have credentials we can route with.
+            let has_routable_credentials =
+                api_key.is_some() || (provider_type == ProviderType::Google && has_oauth);
+            if !has_routable_credentials {
+                continue;
+            }
+
+            // Skip duplicates — e.g. "openai" and "codex" both map to OpenAI.
+            // Must come after the api_key check so a keyless alias doesn't
+            // shadow a valid one.
+            if !seen_types.insert(provider_type) {
+                continue;
+            }
+
+            // Check if this provider is disabled in opencode.json
+            let config_entry = get_provider_config_entry(&opencode_config, provider_type);
+            if let Some(ref entry) = config_entry {
+                if entry.enabled == Some(false) {
+                    continue;
+                }
+            }
+
+            let base_url = config_entry.and_then(|e| e.base_url);
+
+            accounts.push(crate::provider_health::StandardAccount {
+                account_id: crate::provider_health::stable_provider_uuid(provider_type.id()),
+                provider_type,
+                api_key,
+                has_oauth,
+                base_url,
+                oauth_expires_at,
+            });
+        }
+    }
+
+    // Anthropic subscription routing is served by CLI Proxy API, which exposes
+    // an Anthropic/OpenAI-compatible local endpoint backed by Claude accounts.
+    // Those credentials do not live in OpenCode auth.json, so synthesize a
+    // standard Anthropic OAuth account when the proxy has a usable Claude
+    // account. This keeps model-routing chains like `opus` and `opus-6`
+    // selectable without depending on direct Anthropic OAuth/API-key records.
+    //
+    // Respect `enabled == false` in opencode.json — if the user explicitly
+    // disabled Anthropic, don't reintroduce it through the synthetic path.
+    let anthropic_disabled = get_provider_config_entry(&opencode_config, ProviderType::Anthropic)
+        .and_then(|e| e.enabled)
+        == Some(false);
+    if !seen_types.contains(&ProviderType::Anthropic)
+        && !anthropic_disabled
+        && anthropic_cli_proxy_account_available()
+    {
+        accounts.push(crate::provider_health::StandardAccount {
+            account_id: crate::provider_health::stable_provider_uuid("anthropic-cli-proxy"),
+            provider_type: ProviderType::Anthropic,
+            api_key: None,
+            has_oauth: true,
+            base_url: None,
+            // Freshness of the underlying CLI-proxy credential is checked
+            // at availability time (`has_fresh_cli_proxy_*`); once this
+            // synthetic entry is added we don't want the chain resolver
+            // to drop it for "missing expiry". Use a far-future sentinel
+            // so any future code that defaults None to 0 still keeps it.
+            oauth_expires_at: Some(i64::MAX),
+        });
+    }
+
+    // Same pattern for OpenAI (ChatGPT Plus/Pro OAuth). The Codex OAuth JWT
+    // isn't valid against `api.openai.com/v1/chat/completions` directly, but
+    // the CLI proxy exposes an OpenAI-compatible endpoint that translates it
+    // to the Codex `/v1/responses` API internally. So when we have no API
+    // key and the proxy has fresh codex credentials, let chains route through
+    // the proxy instead of giving up.
+    let openai_disabled = get_provider_config_entry(&opencode_config, ProviderType::OpenAI)
+        .and_then(|e| e.enabled)
+        == Some(false);
+    if !seen_types.contains(&ProviderType::OpenAI)
+        && !openai_disabled
+        && openai_cli_proxy_account_available()
+    {
+        accounts.push(crate::provider_health::StandardAccount {
+            account_id: crate::provider_health::stable_provider_uuid("openai-cli-proxy"),
+            provider_type: ProviderType::OpenAI,
+            api_key: None,
+            has_oauth: true,
+            base_url: None,
+            // Freshness of the underlying CLI-proxy credential is checked
+            // at availability time (`has_fresh_cli_proxy_*`); once this
+            // synthetic entry is added we don't want the chain resolver
+            // to drop it for "missing expiry". Use a far-future sentinel
+            // so any future code that defaults None to 0 still keeps it.
+            oauth_expires_at: Some(i64::MAX),
+        });
+    }
+
+    accounts
+}
+
+pub(crate) fn anthropic_cli_proxy_account_available() -> bool {
+    if env_var_bool("CLAUDE_CODE_DISABLE_CLI_PROXY", false) {
+        return false;
+    }
+
+    crate::util::any_cli_proxy_env_configured() || has_fresh_cli_proxy_claude_account()
+}
+
+fn has_fresh_cli_proxy_claude_account() -> bool {
+    has_fresh_cli_proxy_account_of_type("claude-", "claude")
+}
+
+/// True when the CLI Proxy API has at least one fresh Codex (ChatGPT
+/// Plus/Pro OAuth) credential on disk. Used to decide whether the
+/// `openai-cli-proxy` synthetic standard account is worth adding to
+/// chains — without a live upstream credential the proxy would 401 on
+/// every request, so keeping it out of the chain avoids wasted attempts.
+pub(crate) fn has_fresh_cli_proxy_codex_account() -> bool {
+    has_fresh_cli_proxy_account_of_type("codex-", "codex")
+}
+
+/// Scan the CLI proxy's auth directory for entries with
+/// `name.starts_with(file_prefix)` and `type == type_tag`, returning true
+/// as soon as one is enabled and has a non-empty access_token that hasn't
+/// expired. Shared by Claude and Codex because the directory layout and
+/// file shape are identical across providers.
+fn has_fresh_cli_proxy_account_of_type(file_prefix: &str, type_tag: &str) -> bool {
+    let mut dirs = Vec::new();
+    if let Ok(dir) = std::env::var("CLI_PROXY_AUTH_DIR") {
+        let trimmed = dir.trim();
+        if !trimmed.is_empty() {
+            dirs.push(std::path::PathBuf::from(trimmed));
+        }
+    }
+    dirs.push(std::path::PathBuf::from("/root/.cli-proxy-api"));
+
+    let now = chrono::Utc::now();
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if !(name.starts_with(file_prefix) && name.ends_with(".json")) {
+                continue;
+            }
+            let Ok(contents) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) else {
+                continue;
+            };
+            if value
+                .get("disabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            if value.get("type").and_then(|v| v.as_str()) != Some(type_tag) {
+                continue;
+            }
+            let has_access = value
+                .get("access_token")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| !s.trim().is_empty());
+            if !has_access {
+                continue;
+            }
+            // CLIProxyAPI writes the expiry as `expired` (an RFC3339 string)
+            // today, but also check `expires`/`expires_at` so a future rename
+            // or an alternate proxy schema is caught.
+            //
+            // Missing or unparseable expiry fields are treated as **not
+            // fresh** — if we can't tell, assume expired. Otherwise a
+            // malformed credential file would force traffic through a
+            // proxy that's about to 401 on every request.
+            let expiry_str = value
+                .get("expired")
+                .or_else(|| value.get("expires"))
+                .or_else(|| value.get("expires_at"))
+                .and_then(|v| v.as_str());
+            let Some(expired) = expiry_str else {
+                continue;
+            };
+            if let Ok(expires_at) = chrono::DateTime::parse_from_rfc3339(expired) {
+                if expires_at.with_timezone(&chrono::Utc) > now {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
+/// Equivalent of `anthropic_cli_proxy_account_available` for OpenAI
+/// (Codex) OAuth. The OpenAI CLI-proxy path only makes sense when a
+/// Codex OAuth JWT is available on disk — the proxy translates that
+/// token into Codex `/v1/responses` calls. Explicit `CLAUDE_CODE_PROXY_*`
+/// env vars alone (common for Anthropic-only deployments) are *not*
+/// enough: without a Codex credential the proxy 401s on every request.
+pub(crate) fn openai_cli_proxy_account_available() -> bool {
+    if env_var_bool("CLAUDE_CODE_DISABLE_CLI_PROXY", false) {
+        return false;
+    }
+
+    has_fresh_cli_proxy_codex_account()
+}
+
+/// Create AI provider routes.
+pub fn routes() -> Router<Arc<super::routes::AppState>> {
+    Router::new()
+        .route("/", get(list_providers))
+        .route("/", post(create_provider))
+        .route("/types", get(list_provider_types))
+        .route("/opencode-auth", get(get_opencode_auth))
+        .route("/opencode-auth", post(set_opencode_auth))
+        .route("/for-backend/:backend_id", get(get_provider_for_backend))
+        // Bulk usage snapshot for the dashboard — returns the entire cache map
+        // and triggers async background refreshes for any stale entries.
+        .route("/usage", get(list_all_provider_usage))
+        .route("/:id", get(get_provider))
+        .route("/:id", put(update_provider))
+        .route("/:id", delete(delete_provider))
+        .route("/:id/auth", post(authenticate_provider))
+        .route("/:id/auth/methods", get(get_auth_methods))
+        .route("/:id/oauth/authorize", post(oauth_authorize))
+        .route("/:id/oauth/callback", post(oauth_callback))
+        .route("/:id/default", post(set_default))
+        .route("/:id/health", post(check_provider_health))
+        .route("/:id/usage", get(get_provider_usage_cached))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Public API for Backend Access
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Claude Code authentication material.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaudeCodeAuth {
+    ApiKey(String),
+    OAuthToken(String),
+}
+
+/// Claude Code authentication with expiry info for comparing freshness.
+#[derive(Debug, Clone)]
+pub struct ClaudeCodeAuthWithExpiry {
+    pub auth: ClaudeCodeAuth,
+    /// Expiry timestamp in milliseconds. None for API keys (never expire).
+    pub expires_at: Option<i64>,
+}
+
+pub fn default_backends_for_provider(provider_type: ProviderType) -> Vec<String> {
+    match provider_type {
+        ProviderType::Anthropic => vec!["opencode".to_string(), "claudecode".to_string()],
+        ProviderType::OpenAI => vec!["opencode".to_string(), "codex".to_string()],
+        ProviderType::Google => vec!["opencode".to_string(), "gemini".to_string()],
+        ProviderType::Xai => vec!["opencode".to_string(), "grok".to_string()],
+        _ => vec!["opencode".to_string()],
+    }
+}
+
+pub fn provider_targets_backend(
+    working_dir: &Path,
+    provider_type: ProviderType,
+    backend: &str,
+) -> bool {
+    let backends_state = read_provider_backends_state(working_dir);
+    let configured = backends_state
+        .get(provider_type.id())
+        .cloned()
+        .unwrap_or_else(|| default_backends_for_provider(provider_type));
+
+    configured.iter().any(|candidate| candidate == backend)
+}
+
+/// Return the preferred xAI API key for Grok Build.
+///
+/// Grok's headless docs use `GROK_CODE_XAI_API_KEY`; xAI provider entries in
+/// Sandboxed.sh are stored as regular xAI API keys and can be targeted at the
+/// `grok` backend through `use_for_backends`.
+pub fn get_xai_api_key_for_grok(working_dir: &Path) -> Option<String> {
+    if !provider_targets_backend(working_dir, ProviderType::Xai, "grok") {
+        return None;
+    }
+
+    let path = working_dir.join(AI_PROVIDERS_PATH);
+    let contents = std::fs::read_to_string(path).ok()?;
+    let mut providers: Vec<crate::ai_providers::AIProvider> =
+        serde_json::from_str(&contents).ok()?;
+    providers.sort_by_key(|provider| provider.priority);
+    providers.into_iter().find_map(|provider| {
+        if provider.provider_type != ProviderType::Xai || !provider.enabled {
+            return None;
+        }
+
+        provider
+            .api_key
+            .filter(|key| !key.trim().is_empty())
+            .map(|key| key.trim().to_string())
+    })
+}
+
+/// Get the Anthropic API key or OAuth access token for the Claude Code backend.
+///
+/// This checks if the Anthropic provider has "claudecode" in its use_for_backends
+/// configuration and returns the API key or OAuth access token if available.
+///
+/// Credential sources checked (in order):
+/// 1. OpenCode auth.json (API key or OAuth)
+/// 2. sandboxed.sh ai_providers.json (API key or OAuth)
+///
+/// Returns None if:
+/// - Anthropic provider is not configured for claudecode
+/// - No credentials are available (neither API key nor OAuth)
+/// - Any error occurs reading the config
+pub fn get_anthropic_auth_for_claudecode(working_dir: &Path) -> Option<ClaudeCodeAuth> {
+    // Read the provider backends state to check use_for_backends
+    let backends_state = read_provider_backends_state(working_dir);
+    tracing::debug!(
+        working_dir = %working_dir.display(),
+        backends_state = ?backends_state,
+        "Claude Code auth lookup: read provider backends state"
+    );
+
+    // Check if Anthropic provider has claudecode in use_for_backends
+    let anthropic_backends = backends_state.get(ProviderType::Anthropic.id());
+    let use_for_claudecode =
+        provider_targets_backend(working_dir, ProviderType::Anthropic, "claudecode");
+    tracing::debug!(
+        anthropic_backends = ?anthropic_backends,
+        use_for_claudecode = use_for_claudecode,
+        "Claude Code auth lookup: checked backends"
+    );
+
+    if !use_for_claudecode {
+        tracing::debug!("Claude Code not in Anthropic backends, trying fallback auth sources");
+        if let Some(auth) = get_anthropic_auth_from_opencode_auth()
+            .or_else(|| get_anthropic_auth_from_ai_providers(working_dir))
+            .or_else(get_anthropic_auth_from_claude_cli_credentials)
+        {
+            tracing::warn!(
+                "Anthropic credentials found but not marked for Claude Code; using them anyway"
+            );
+            return Some(auth);
+        }
+        tracing::debug!("No Anthropic credentials found in fallback sources");
+        return None;
+    }
+
+    // Try to get credentials from OpenCode auth.json first
+    if let Some(auth) = get_anthropic_auth_from_opencode_auth() {
+        tracing::debug!("Found Anthropic credentials in OpenCode auth.json");
+        return Some(auth);
+    }
+    tracing::debug!("No Anthropic credentials in OpenCode auth.json, trying ai_providers.json");
+
+    // Fall back to ai_providers.json
+    if let Some(auth) = get_anthropic_auth_from_ai_providers(working_dir) {
+        return Some(auth);
+    }
+    tracing::debug!(
+        "No Anthropic credentials found in ai_providers.json, trying Claude CLI credentials"
+    );
+
+    // Fall back to Claude CLI's own credentials file
+    let result = get_anthropic_auth_from_claude_cli_credentials();
+    if result.is_none() {
+        tracing::debug!("No Anthropic credentials found in Claude CLI credentials either");
+    }
+    result
+}
+
+/// Get Anthropic auth from a workspace's OpenCode auth file.
+///
+/// For container workspaces, the auth is stored inside the container filesystem at:
+/// `<workspace_root>/root/.opencode/auth/anthropic.json`
+///
+/// This function handles:
+/// - Container workspaces: checks `<workspace_root>/root/.opencode/auth/anthropic.json`
+/// - Host workspaces: checks nothing (standard paths are handled by get_anthropic_auth_from_opencode_auth)
+///
+/// Returns auth with expiry info to enable freshness comparison.
+pub fn get_anthropic_auth_from_workspace(
+    workspace_root: &std::path::Path,
+) -> Option<ClaudeCodeAuthWithExpiry> {
+    // For container workspaces, look inside the container's root filesystem
+    // The auth file is at: <workspace_root>/root/.opencode/auth/anthropic.json
+    let auth_path = workspace_root
+        .join("root")
+        .join(".opencode")
+        .join("auth")
+        .join("anthropic.json");
+
+    if !auth_path.exists() {
+        tracing::debug!(
+            auth_path = %auth_path.display(),
+            "No workspace auth file found"
+        );
+        return None;
+    }
+
+    tracing::debug!(
+        auth_path = %auth_path.display(),
+        "Found workspace auth file"
+    );
+
+    let contents = match std::fs::read_to_string(&auth_path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                auth_path = %auth_path.display(),
+                error = %e,
+                "Failed to read workspace auth file"
+            );
+            return None;
+        }
+    };
+
+    let anthropic_auth: serde_json::Value = match serde_json::from_str(&contents) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                auth_path = %auth_path.display(),
+                error = %e,
+                "Failed to parse workspace auth file"
+            );
+            return None;
+        }
+    };
+
+    // Extract expiry timestamp (for OAuth tokens)
+    let expires_at = anthropic_auth.get("expires").and_then(|v| v.as_i64());
+
+    // Check auth type and extract credentials
+    let auth_type = anthropic_auth.get("type").and_then(|v| v.as_str());
+
+    // Determine if this is an OAuth token (for expiry handling)
+    let is_oauth = matches!(auth_type, Some("oauth"))
+        || (auth_type.is_none()
+            && anthropic_auth.get("access").is_some()
+            && anthropic_auth.get("key").is_none());
+
+    let auth = match auth_type {
+        Some("api_key") | Some("api") => anthropic_auth
+            .get("key")
+            .or_else(|| anthropic_auth.get("api_key"))
+            .and_then(|v| v.as_str())
+            .map(|s| ClaudeCodeAuth::ApiKey(s.to_string())),
+        Some("oauth") => anthropic_auth
+            .get("access")
+            .and_then(|v| v.as_str())
+            .map(|s| ClaudeCodeAuth::OAuthToken(s.to_string())),
+        _ => {
+            // Try key first, then OAuth access token
+            if let Some(key) = anthropic_auth.get("key").and_then(|v| v.as_str()) {
+                Some(ClaudeCodeAuth::ApiKey(key.to_string()))
+            } else {
+                anthropic_auth
+                    .get("access")
+                    .and_then(|v| v.as_str())
+                    .map(|s| ClaudeCodeAuth::OAuthToken(s.to_string()))
+            }
+        }
+    };
+
+    auth.map(|a| ClaudeCodeAuthWithExpiry {
+        auth: a,
+        // API keys don't expire, OAuth tokens have expiry
+        expires_at: if is_oauth { expires_at } else { None },
+    })
+}
+
+/// Get the path to the workspace auth file for container workspaces.
+pub fn get_workspace_auth_path(workspace_root: &std::path::Path) -> std::path::PathBuf {
+    workspace_root
+        .join("root")
+        .join(".opencode")
+        .join("auth")
+        .join("anthropic.json")
+}
+
+/// Read an OAuth token entry from a container workspace's OpenCode auth file.
+fn read_oauth_entry_from_workspace_auth(
+    workspace_root: &std::path::Path,
+) -> Option<OAuthTokenEntry> {
+    let auth_path = get_workspace_auth_path(workspace_root);
+    if !auth_path.exists() {
+        return None;
+    }
+
+    let contents = std::fs::read_to_string(&auth_path).ok()?;
+    let auth: serde_json::Value = serde_json::from_str(&contents).ok()?;
+
+    let auth_type = auth.get("type").and_then(|v| v.as_str());
+    if auth_type != Some("oauth") {
+        return None;
+    }
+
+    let refresh_token = auth.get("refresh").and_then(|v| v.as_str())?;
+    let access_token = auth.get("access").and_then(|v| v.as_str()).unwrap_or("");
+    let expires_at = auth.get("expires").and_then(|v| v.as_i64()).unwrap_or(0);
+
+    tracing::debug!(
+        auth_path = %auth_path.display(),
+        expires_at = expires_at,
+        "Found OAuth token entry in container workspace auth"
+    );
+
+    Some(OAuthTokenEntry {
+        refresh_token: refresh_token.to_string(),
+        access_token: access_token.to_string(),
+        expires_at,
+    })
+}
+
+/// Get Anthropic auth from host OpenCode auth.json with expiry info.
+pub fn get_anthropic_auth_from_host_with_expiry() -> Option<ClaudeCodeAuthWithExpiry> {
+    let entry = read_oauth_token_entry(ProviderType::Anthropic)?;
+
+    // If there's an OAuth entry with access token
+    if !entry.access_token.is_empty() {
+        return Some(ClaudeCodeAuthWithExpiry {
+            auth: ClaudeCodeAuth::OAuthToken(entry.access_token),
+            expires_at: Some(entry.expires_at),
+        });
+    }
+
+    // Otherwise try to get auth from OpenCode auth.json (might be API key)
+    get_anthropic_auth_from_opencode_auth().map(|auth| ClaudeCodeAuthWithExpiry {
+        auth,
+        expires_at: None, // API keys don't expire
+    })
+}
+
+/// Refresh an expired workspace Anthropic OAuth token.
+/// Reads the refresh token from the workspace auth file, refreshes it via Anthropic API,
+/// and writes the new token back to the same file.
+pub async fn refresh_workspace_anthropic_auth(
+    workspace_root: &std::path::Path,
+) -> Result<ClaudeCodeAuthWithExpiry, String> {
+    let auth_path = get_workspace_auth_path(workspace_root);
+    if !auth_path.exists() {
+        return Err("No workspace auth file found".to_string());
+    }
+
+    // Read the current auth file
+    let contents = std::fs::read_to_string(&auth_path)
+        .map_err(|e| format!("Failed to read workspace auth file: {}", e))?;
+    let anthropic_auth: serde_json::Value = serde_json::from_str(&contents)
+        .map_err(|e| format!("Failed to parse workspace auth file: {}", e))?;
+
+    // Check if it's OAuth and get the refresh token
+    let auth_type = anthropic_auth.get("type").and_then(|v| v.as_str());
+    if auth_type != Some("oauth") {
+        return Err("Workspace auth is not OAuth".to_string());
+    }
+
+    let refresh_token = anthropic_auth
+        .get("refresh")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "No refresh token in workspace auth".to_string())?;
+
+    tracing::info!(
+        workspace_path = %workspace_root.display(),
+        "Refreshing expired workspace Anthropic OAuth token"
+    );
+
+    // Exchange refresh token for new access token
+    let client = reqwest::Client::new();
+    let token_response = client
+        .post("https://console.anthropic.com/v1/oauth/token")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+            ("client_id", ANTHROPIC_CLIENT_ID),
+        ])
+        .send()
+        .await
+        .map_err(|e| format!("Failed to refresh token: {}", e))?;
+
+    if !token_response.status().is_success() {
+        let status = token_response.status();
+        let error_text = token_response.text().await.unwrap_or_default();
+        tracing::error!(
+            "Workspace token refresh failed with status {}: {}",
+            status,
+            error_text
+        );
+        // If invalid_grant, delete the stale workspace auth file
+        let lower = error_text.to_lowercase();
+        if (status == reqwest::StatusCode::BAD_REQUEST
+            || status == reqwest::StatusCode::UNAUTHORIZED)
+            && lower.contains("invalid_grant")
+        {
+            if let Err(e) = std::fs::remove_file(&auth_path) {
+                tracing::warn!(
+                    path = %auth_path.display(),
+                    error = %e,
+                    "Failed to remove invalid workspace auth file"
+                );
+            } else {
+                tracing::info!(
+                    path = %auth_path.display(),
+                    "Removed invalid workspace auth file"
+                );
+            }
+        }
+        return Err(format!(
+            "Token refresh failed ({}): {}. You may need to re-authenticate.",
+            status, error_text
+        ));
+    }
+
+    let token_data: serde_json::Value = token_response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse token response: {}", e))?;
+
+    let new_access_token = token_data["access_token"]
+        .as_str()
+        .ok_or_else(|| "No access token in refresh response".to_string())?;
+
+    let new_refresh_token = token_data["refresh_token"]
+        .as_str()
+        .unwrap_or(refresh_token); // Use old refresh token if not provided
+
+    let expires_in = token_data["expires_in"].as_i64().unwrap_or(3600);
+    let expires_at = chrono::Utc::now().timestamp_millis() + (expires_in * 1000);
+
+    // Write the new token back to the workspace auth file
+    let new_auth = serde_json::json!({
+        "type": "oauth",
+        "access": new_access_token,
+        "refresh": new_refresh_token,
+        "expires": expires_at
+    });
+
+    if let Some(parent) = auth_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create workspace auth directory: {}", e))?;
+    }
+
+    let contents = serde_json::to_string_pretty(&new_auth)
+        .map_err(|e| format!("Failed to serialize auth: {}", e))?;
+    std::fs::write(&auth_path, contents)
+        .map_err(|e| format!("Failed to write workspace auth file: {}", e))?;
+
+    // **Solution #3: Sync to all storage tiers atomically**
+    if let Err(e) = sync_oauth_to_all_tiers(
+        ProviderType::Anthropic,
+        new_refresh_token,
+        new_access_token,
+        expires_at,
+    ) {
+        tracing::warn!("Failed to sync refreshed token to all tiers: {}", e);
+    }
+
+    tracing::info!(
+        workspace_path = %workspace_root.display(),
+        "Successfully refreshed workspace Anthropic OAuth token, expires in {} seconds",
+        expires_in
+    );
+
+    Ok(ClaudeCodeAuthWithExpiry {
+        auth: ClaudeCodeAuth::OAuthToken(new_access_token.to_string()),
+        expires_at: Some(expires_at),
+    })
+}
+
+/// Get Anthropic API key or OAuth access token from OpenCode auth.json.
+fn get_anthropic_auth_from_opencode_auth() -> Option<ClaudeCodeAuth> {
+    let auth = match read_opencode_auth() {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::debug!("Failed to read OpenCode auth.json: {}", e);
+            return None;
+        }
+    };
+    let anthropic_auth = match auth.get("anthropic") {
+        Some(a) => a,
+        None => {
+            tracing::debug!(
+                "No 'anthropic' key in OpenCode auth.json (keys: {:?})",
+                auth.as_object().map(|o| o.keys().collect::<Vec<_>>())
+            );
+            return None;
+        }
+    };
+
+    // Check for API key first
+    let auth_type = anthropic_auth.get("type").and_then(|v| v.as_str());
+    match auth_type {
+        Some("api_key") | Some("api") => anthropic_auth
+            .get("key")
+            .or_else(|| anthropic_auth.get("api_key"))
+            .and_then(|v| v.as_str())
+            .map(|s| ClaudeCodeAuth::ApiKey(s.to_string())),
+        Some("oauth") => {
+            // Return OAuth access token - Claude CLI can use this
+            anthropic_auth
+                .get("access")
+                .and_then(|v| v.as_str())
+                .map(|s| ClaudeCodeAuth::OAuthToken(s.to_string()))
+        }
+        _ => {
+            // Check without type field - try key first, then OAuth access token
+            if let Some(key) = anthropic_auth.get("key").and_then(|v| v.as_str()) {
+                return Some(ClaudeCodeAuth::ApiKey(key.to_string()));
+            }
+            // Fall back to OAuth access token
+            anthropic_auth
+                .get("access")
+                .and_then(|v| v.as_str())
+                .map(|s| ClaudeCodeAuth::OAuthToken(s.to_string()))
+        }
+    }
+}
+
+/// Get Anthropic API key or OAuth access token from sandboxed.sh's ai_providers.json.
+fn get_anthropic_auth_from_ai_providers(working_dir: &Path) -> Option<ClaudeCodeAuth> {
+    get_all_anthropic_auth_from_ai_providers(working_dir)
+        .into_iter()
+        .next()
+}
+
+/// Load the ai_providers.json array, returning an empty vec on any failure.
+///
+/// Read/parse failures previously vanished silently which made post-mortem
+/// debugging of credential-rotation incidents impossible. We now emit a warn
+/// so the journal records exactly why the credential pool ended up empty.
+fn load_ai_providers(working_dir: &Path) -> Vec<serde_json::Value> {
+    let path = working_dir.join(AI_PROVIDERS_PATH);
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) => {
+            // ENOENT is the common case before the user has connected any
+            // provider, so only escalate other errors to warn level.
+            if e.kind() == std::io::ErrorKind::NotFound {
+                tracing::debug!(path = %path.display(), "ai_providers.json not present");
+            } else {
+                tracing::warn!(path = %path.display(), error = %e, "Failed to read ai_providers.json");
+            }
+            return Vec::new();
+        }
+    };
+    match serde_json::from_str::<Vec<serde_json::Value>>(&contents) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                bytes = contents.len(),
+                "Failed to parse ai_providers.json as JSON array; treating as empty",
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// Get all Anthropic credentials from ai_providers.json, sorted by priority.
+fn get_all_anthropic_auth_from_ai_providers(working_dir: &Path) -> Vec<ClaudeCodeAuth> {
+    let providers = load_ai_providers(working_dir);
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let freshness_buffer_ms = 60_000;
+
+    // Collect (priority, insertion_index, auth) for deterministic sorting.
+    // The insertion index breaks ties when multiple accounts share the same priority.
+    let mut entries: Vec<(u32, usize, ClaudeCodeAuth)> = Vec::new();
+
+    for (idx, provider) in providers.iter().enumerate() {
+        let provider_type = provider.get("provider_type").and_then(|v| v.as_str());
+        if provider_type != Some("anthropic") {
+            continue;
+        }
+        let enabled = provider
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        if !enabled {
+            continue;
+        }
+        let priority = provider
+            .get("priority")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+
+        // Check for API key first
+        if let Some(api_key) = provider.get("api_key").and_then(|v| v.as_str()) {
+            if !api_key.trim().is_empty() {
+                entries.push((priority, idx, ClaudeCodeAuth::ApiKey(api_key.to_string())));
+                continue;
+            }
+        }
+
+        // Check for OAuth access token
+        if let Some(oauth) = provider.get("oauth") {
+            if let Some(access_token) = oauth.get("access_token").and_then(|v| v.as_str()) {
+                let expires_at = oauth
+                    .get("expires_at")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                if expires_at <= now_ms + freshness_buffer_ms {
+                    tracing::warn!(
+                        provider_id = provider.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+                        expires_at = expires_at,
+                        "Skipping expired Anthropic OAuth credential from ai_providers.json"
+                    );
+                    continue;
+                }
+                if !access_token.is_empty() {
+                    entries.push((
+                        priority,
+                        idx,
+                        ClaudeCodeAuth::OAuthToken(access_token.to_string()),
+                    ));
+                }
+            }
+        }
+    }
+
+    entries.sort_by_key(|(p, i, _)| (*p, *i));
+    entries.into_iter().map(|(_, _, auth)| auth).collect()
+}
+
+/// Get all available Anthropic credentials for Claude Code, in priority order.
+///
+/// Collects credentials from all sources:
+/// 1. OpenCode auth.json (anthropic entry)
+/// 2. ai_providers.json (potentially multiple accounts, sorted by priority)
+/// 3. Claude CLI credentials file
+///
+/// Used for account rotation: when one account hits a rate limit, the mission
+/// runner can try the next credential in the list.
+pub fn get_all_anthropic_auth_for_claudecode(working_dir: &Path) -> Vec<ClaudeCodeAuth> {
+    let mut all_auth = Vec::new();
+    let mut seen_tokens = std::collections::HashSet::new();
+
+    // Helper to deduplicate by credential value
+    let mut push_unique = |auth: ClaudeCodeAuth| {
+        let key = match &auth {
+            ClaudeCodeAuth::ApiKey(k) => k.clone(),
+            ClaudeCodeAuth::OAuthToken(t) => t.clone(),
+        };
+        if seen_tokens.insert(key) {
+            all_auth.push(auth);
+        }
+    };
+
+    // 1. OpenCode auth.json (highest priority — it's the "default" credential)
+    if let Some(auth) = get_anthropic_auth_from_opencode_auth() {
+        push_unique(auth);
+    }
+
+    // 2. ai_providers.json (multi-account, sorted by priority)
+    for auth in get_all_anthropic_auth_from_ai_providers(working_dir) {
+        push_unique(auth);
+    }
+
+    // 3. Claude CLI credentials
+    if let Some(auth) = get_anthropic_auth_from_claude_cli_credentials() {
+        push_unique(auth);
+    }
+
+    all_auth
+}
+
+/// Get all available OpenAI API keys for Codex account rotation, in priority order.
+///
+/// Collects keys from all sources:
+/// 1. OPENAI_API_KEY environment variable
+/// 2. OpenCode auth.json (openai entry)
+/// 3. ai_providers.json (potentially multiple OpenAI accounts, sorted by priority)
+///
+/// Used for account rotation: when one account hits a rate limit, the mission
+/// runner can try the next key in the list.
+pub fn get_all_openai_keys_for_codex(working_dir: &Path) -> Vec<String> {
+    let mut all_keys = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    let mut push_unique = |key: String| {
+        if seen.insert(key.clone()) {
+            all_keys.push(key);
+        }
+    };
+
+    // 1. OPENAI_API_KEY env var (highest priority — it's the "default" credential)
+    if let Ok(value) = std::env::var("OPENAI_API_KEY") {
+        if !value.trim().is_empty() {
+            push_unique(value);
+        }
+    }
+
+    // 2. OpenCode auth.json
+    if let Some(key) = get_openai_api_key_from_opencode_auth() {
+        push_unique(key);
+    }
+
+    // 3. ai_providers.json (multi-account, sorted by priority)
+    for key in get_all_openai_keys_from_ai_providers(working_dir) {
+        push_unique(key);
+    }
+
+    all_keys
+}
+
+/// Get all OpenAI API keys from ai_providers.json, sorted by priority.
+fn get_all_openai_keys_from_ai_providers(working_dir: &Path) -> Vec<String> {
+    let providers = load_ai_providers(working_dir);
+
+    let mut entries: Vec<(u32, usize, String)> = Vec::new();
+
+    for (idx, provider) in providers.iter().enumerate() {
+        let provider_type = provider.get("provider_type").and_then(|v| v.as_str());
+        if provider_type != Some("openai") {
+            continue;
+        }
+        let enabled = provider
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        if !enabled {
+            continue;
+        }
+        let priority = provider
+            .get("priority")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+
+        if let Some(api_key) = provider.get("api_key").and_then(|v| v.as_str()) {
+            if !api_key.trim().is_empty() {
+                entries.push((priority, idx, api_key.to_string()));
+            }
+        }
+    }
+
+    entries.sort_by_key(|(p, i, _)| (*p, *i));
+    entries.into_iter().map(|(_, _, key)| key).collect()
+}
+
+/// Get Anthropic auth from Claude CLI's own credentials file.
+///
+/// The Claude CLI stores OAuth credentials in `~/.claude/.credentials.json` with format:
+/// ```json
+/// {
+///   "claudeAiOauth": {
+///     "accessToken": "sk-ant-oat01-...",
+///     "expiresAt": 1769395897294,
+///     "refreshToken": "sk-ant-ort01-...",
+///     "scopes": ["user:inference", "user:profile", "user:sessions:claude_code"]
+///   }
+/// }
+/// ```
+///
+/// This function checks multiple possible locations:
+/// - /var/lib/opencode/.claude/.credentials.json (isolated OpenCode home)
+/// - /root/.claude/.credentials.json (standard root home)
+/// - $HOME/.claude/.credentials.json (current user's home)
+fn get_anthropic_auth_from_claude_cli_credentials() -> Option<ClaudeCodeAuth> {
+    let locations = [
+        // OpenCode isolated home (used when OPENCODE_CONFIG_DIR is set)
+        std::path::PathBuf::from("/var/lib/opencode/.claude/.credentials.json"),
+        // Standard root home
+        std::path::PathBuf::from("/root/.claude/.credentials.json"),
+    ];
+
+    // Also try HOME env var
+    let home_path = std::env::var("HOME")
+        .ok()
+        .map(|h| std::path::PathBuf::from(h).join(".claude/.credentials.json"));
+
+    for path in locations.iter().chain(home_path.iter()) {
+        if !path.exists() {
+            continue;
+        }
+
+        let contents = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::debug!(
+                    path = %path.display(),
+                    error = %e,
+                    "Failed to read Claude CLI credentials file"
+                );
+                continue;
+            }
+        };
+
+        let creds: serde_json::Value = match serde_json::from_str(&contents) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::debug!(
+                    path = %path.display(),
+                    error = %e,
+                    "Failed to parse Claude CLI credentials file"
+                );
+                continue;
+            }
+        };
+
+        // Look for claudeAiOauth.accessToken
+        if let Some(oauth) = creds.get("claudeAiOauth") {
+            if let Some(access_token) = oauth.get("accessToken").and_then(|v| v.as_str()) {
+                if !access_token.is_empty() {
+                    tracing::info!(
+                        path = %path.display(),
+                        "Found Anthropic OAuth token in Claude CLI credentials file"
+                    );
+                    return Some(ClaudeCodeAuth::OAuthToken(access_token.to_string()));
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Check if the Anthropic provider is configured for the Claude Code backend.
+pub fn is_anthropic_configured_for_claudecode(working_dir: &Path) -> bool {
+    provider_targets_backend(working_dir, ProviderType::Anthropic, "claudecode")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OpenAI/Codex Backend Access
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Codex authentication material (same as Claude Code auth).
+pub type CodexAuth = ClaudeCodeAuth;
+
+fn looks_like_json_file(path: &std::path::Path) -> bool {
+    let metadata = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    if metadata.len() == 0 {
+        return false;
+    }
+
+    let contents = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let first = contents.chars().find(|c| !c.is_whitespace());
+    matches!(first, Some('{') | Some('['))
+}
+
+/// Get OpenAI auth from OpenCode auth.json (shared with OpenCode).
+fn get_openai_api_key_from_opencode_auth() -> Option<String> {
+    let auth = read_opencode_auth().ok()?;
+
+    for key in opencode_auth_keys(ProviderType::OpenAI) {
+        let entry = auth.get(key)?;
+        let auth_type = entry.get("type").and_then(|v| v.as_str());
+        if matches!(auth_type, Some("oauth")) {
+            continue;
+        }
+
+        let api_key = entry
+            .get("key")
+            .or_else(|| entry.get("api_key"))
+            .and_then(|v| v.as_str())?;
+        if api_key.trim().is_empty() {
+            continue;
+        }
+        return Some(api_key.to_string());
+    }
+
+    None
+}
+
+fn get_openai_api_key_from_ai_providers(working_dir: &Path) -> Option<String> {
+    get_all_openai_keys_from_ai_providers(working_dir)
+        .into_iter()
+        .next()
+}
+
+fn upsert_openai_api_key_in_ai_providers(working_dir: &Path, api_key: &str) -> Result<(), String> {
+    use crate::ai_providers::{AIProvider, ProviderType};
+
+    if api_key.trim().is_empty() {
+        return Err("OpenAI API key is empty".to_string());
+    }
+
+    let dir = working_dir.join(".sandboxed-sh");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to create .sandboxed-sh directory: {}", e))?;
+
+    let path = dir.join("ai_providers.json");
+    let mut providers: Vec<AIProvider> = if path.exists() {
+        let contents = std::fs::read_to_string(&path)
+            .map_err(|e| format!("Failed to read ai_providers.json: {}", e))?;
+        serde_json::from_str(&contents).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    let now = chrono::Utc::now();
+    if let Some(existing) = providers
+        .iter_mut()
+        .find(|p| p.provider_type == ProviderType::OpenAI)
+    {
+        existing.api_key = Some(api_key.to_string());
+        existing.updated_at = now;
+    } else {
+        let mut p = AIProvider::new(ProviderType::OpenAI, "OpenAI".to_string());
+        p.api_key = Some(api_key.to_string());
+        p.enabled = true;
+        p.updated_at = now;
+        providers.push(p);
+    }
+
+    let contents = serde_json::to_string_pretty(&providers)
+        .map_err(|e| format!("Failed to serialize ai_providers.json: {}", e))?;
+    std::fs::write(&path, contents)
+        .map_err(|e| format!("Failed to write ai_providers.json: {}", e))?;
+
+    Ok(())
+}
+
+/// Returns the default OpenAI API key for Codex (env var > auth.json > ai_providers.json).
+/// Public so the mission runner can determine which key was already used on the initial attempt.
+pub fn get_openai_api_key_for_codex_default(working_dir: &Path) -> Option<String> {
+    if let Ok(value) = std::env::var("OPENAI_API_KEY") {
+        if !value.trim().is_empty() {
+            return Some(value);
+        }
+    }
+
+    get_openai_api_key_from_opencode_auth()
+        .or_else(|| get_openai_api_key_from_ai_providers(working_dir))
+}
+
+/// Get the OpenAI API key or OAuth access token for the Codex backend.
+///
+/// This checks if the OpenAI provider has "codex" in its use_for_backends
+/// configuration and returns the API key or OAuth access token if available.
+///
+/// Credential sources checked (in order):
+/// 1. OpenCode auth.json (API key or OAuth)
+/// 2. sandboxed.sh ai_providers.json (API key or OAuth)
+///
+/// Returns None if:
+/// - OpenAI provider is not configured for codex
+/// - No credentials are available (neither API key nor OAuth)
+/// - Any error occurs reading the config
+///
+/// The Codex CLI stores its auth in `~/.codex/auth.json`, which contains
+/// fields (id_token, account_id) that are only obtained during the interactive
+/// OAuth login flow. We cannot reconstruct these from the credential store,
+/// so we look for an existing auth.json on the host and copy it verbatim.
+fn find_host_codex_auth_json() -> Option<std::path::PathBuf> {
+    let home = home_dir();
+    let candidates = [
+        std::path::PathBuf::from(&home)
+            .join(".codex")
+            .join("auth.json"),
+        std::path::PathBuf::from("/var/lib/opencode/.codex/auth.json"),
+    ];
+
+    for candidate in &candidates {
+        if looks_like_json_file(candidate) {
+            return Some(candidate.clone());
+        }
+    }
+    None
+}
+
+fn write_codex_auth_json_apikey(config_dir: &std::path::Path, api_key: &str) -> Result<(), String> {
+    if api_key.trim().is_empty() {
+        return Err("OpenAI API key is empty".to_string());
+    }
+
+    std::fs::create_dir_all(config_dir)
+        .map_err(|e| format!("Failed to create Codex config dir: {}", e))?;
+
+    let auth_path = config_dir.join("auth.json");
+    let tmp_path = config_dir.join("auth.json.tmp");
+
+    let payload = serde_json::json!({
+        "auth_mode": "apikey",
+        "OPENAI_API_KEY": api_key,
+    });
+    let contents = serde_json::to_string_pretty(&payload)
+        .map_err(|e| format!("Failed to serialize auth.json: {}", e))?;
+    std::fs::write(&tmp_path, contents)
+        .map_err(|e| format!("Failed to write Codex auth.json: {}", e))?;
+    std::fs::rename(&tmp_path, &auth_path)
+        .map_err(|e| format!("Failed to finalize Codex auth.json: {}", e))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&auth_path, std::fs::Permissions::from_mode(0o600));
+    }
+
+    tracing::debug!("Wrote Codex auth.json (api key) to {}", auth_path.display());
+    Ok(())
+}
+
+/// Write a Codex `auth.json` in ChatGPT OAuth mode.
+///
+/// The Codex CLI can authenticate using the OAuth access_token directly
+/// (without an sk-... API key).  It sends:
+///   - `Authorization: Bearer <access_token>`
+///   - `ChatGPT-Account-ID: <account_id>`
+///
+/// This is the standard auth mode for ChatGPT Plus/Pro users who do not have
+/// an OpenAI API platform organization.
+/// Shared writer for chatgpt-mode `auth.json`. Both
+/// `write_codex_auth_json_chatgpt` (reads tokens from the canonical
+/// credential store) and `write_codex_auth_json_chatgpt_with_tokens`
+/// (gets tokens passed in for per-attempt rotation) delegate here so the
+/// two paths cannot drift on payload shape, atomic-rename semantics, or
+/// permissions.
+fn write_codex_chatgpt_auth_file(
+    config_dir: &std::path::Path,
+    access_token: &str,
+    refresh_token: &str,
+    source_label: &str,
+    include_refresh_token: bool,
+) -> Result<(), String> {
+    if access_token.trim().is_empty() {
+        return Err("OAuth access_token is empty".to_string());
+    }
+
+    // The Codex CLI stores an id_token in its tokens object. We use the
+    // access_token as the id_token since both are JWTs from the same
+    // issuer and the CLI only reads claims from the id_token
+    // (chatgpt_account_id etc).
+    let account_id = extract_chatgpt_account_id(access_token);
+    let id_token_value = access_token.to_string();
+
+    std::fs::create_dir_all(config_dir)
+        .map_err(|e| format!("Failed to create Codex config dir: {}", e))?;
+
+    let auth_path = config_dir.join("auth.json");
+    let tmp_path = config_dir.join("auth.json.tmp");
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut tokens = serde_json::json!({
+        "id_token": id_token_value,
+        "access_token": access_token,
+        "account_id": account_id,
+    });
+    if include_refresh_token {
+        if let Some(obj) = tokens.as_object_mut() {
+            obj.insert(
+                "refresh_token".to_string(),
+                serde_json::Value::String(refresh_token.to_string()),
+            );
+        }
+    }
+
+    let payload = serde_json::json!({
+        "auth_mode": "chatgpt",
+        "OPENAI_API_KEY": null,
+        "tokens": tokens,
+        "last_refresh": now,
+    });
+    let contents = serde_json::to_string_pretty(&payload)
+        .map_err(|e| format!("Failed to serialize auth.json: {}", e))?;
+    std::fs::write(&tmp_path, contents)
+        .map_err(|e| format!("Failed to write Codex auth.json: {}", e))?;
+    std::fs::rename(&tmp_path, &auth_path)
+        .map_err(|e| format!("Failed to finalize Codex auth.json: {}", e))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&auth_path, std::fs::Permissions::from_mode(0o600));
+    }
+
+    tracing::info!(
+        path = %auth_path.display(),
+        account_id = ?account_id,
+        source = %source_label,
+        "Wrote Codex auth.json (chatgpt mode)"
+    );
+    Ok(())
+}
+
+fn write_codex_auth_json_chatgpt(config_dir: &std::path::Path) -> Result<(), String> {
+    let entry = read_oauth_token_entry(ProviderType::OpenAI)
+        .ok_or_else(|| "No OpenAI OAuth credentials found in credential store".to_string())?;
+    write_codex_chatgpt_auth_file(
+        config_dir,
+        &entry.access_token,
+        &entry.refresh_token,
+        "credential_store",
+        true,
+    )
+}
+
+/// Parsed view of a workspace's `auth.json` for codex (chatgpt mode).
+#[derive(Debug, Clone)]
+struct CodexWorkspaceAuth {
+    access_token: String,
+    refresh_token: String,
+    chatgpt_account_id: Option<String>,
+    /// Best-effort parse of the access_token's `exp` claim (ms since epoch).
+    /// Codex never persists a separate expiry field — we derive it from the JWT
+    /// so we can compare freshness with the central store's `expires_at`.
+    expires_at_ms: Option<i64>,
+}
+
+/// Read `<codex_dir>/auth.json` and parse the chatgpt token block if present.
+fn read_codex_workspace_auth(codex_dir: &std::path::Path) -> Option<CodexWorkspaceAuth> {
+    let path = codex_dir.join("auth.json");
+    let contents = std::fs::read_to_string(&path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&contents).ok()?;
+    if value.get("auth_mode").and_then(|v| v.as_str()) != Some("chatgpt") {
+        return None;
+    }
+    let tokens = value.get("tokens")?.as_object()?;
+    let access_token = tokens
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .filter(|s| !s.trim().is_empty())?;
+    let refresh_token = tokens
+        .get("refresh_token")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .filter(|s| !s.trim().is_empty())?;
+    let chatgpt_account_id = extract_chatgpt_account_id(&access_token);
+    let expires_at_ms = extract_jwt_exp_ms(&access_token);
+    Some(CodexWorkspaceAuth {
+        access_token,
+        refresh_token,
+        chatgpt_account_id,
+        expires_at_ms,
+    })
+}
+
+/// Decode a JWT's `exp` claim (seconds-since-epoch) and convert to ms.
+fn extract_jwt_exp_ms(jwt: &str) -> Option<i64> {
+    let parts: Vec<&str> = jwt.split('.').collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let decoded = URL_SAFE_NO_PAD.decode(parts[1]).ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+    claims.get("exp").and_then(|v| v.as_i64()).map(|s| s * 1000)
+}
+
+/// Update the `ai_providers.json` entry whose `oauth.chatgpt_account_id`
+/// matches `account_id` with the supplied tokens. No-op if no entry matches.
+/// Returns `true` when an entry was updated.
+fn update_provider_oauth_for_chatgpt_account(
+    working_dir: &Path,
+    account_id: &str,
+    access_token: &str,
+    refresh_token: &str,
+    expires_at_ms: i64,
+) -> bool {
+    let providers_path = working_dir.join(".sandboxed-sh").join("ai_providers.json");
+    let raw = match std::fs::read_to_string(&providers_path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let mut value: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+
+    let target_array = if value.is_array() {
+        value.as_array_mut()
+    } else {
+        value.get_mut("providers").and_then(|v| v.as_array_mut())
+    };
+    let Some(items) = target_array else {
+        return false;
+    };
+
+    let mut updated = false;
+    for provider in items.iter_mut() {
+        let is_openai = provider
+            .get("provider_type")
+            .and_then(|v| v.as_str())
+            .map(|s| s == "openai")
+            .unwrap_or(false);
+        if !is_openai {
+            continue;
+        }
+
+        let oauth = provider.get("oauth");
+        let stored_account_id = oauth
+            .and_then(|o| o.get("chatgpt_account_id"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let decoded_account_id = oauth
+            .and_then(|o| o.get("access_token"))
+            .and_then(|v| v.as_str())
+            .and_then(extract_chatgpt_account_id);
+        let matches = stored_account_id.as_deref() == Some(account_id)
+            || decoded_account_id.as_deref() == Some(account_id);
+        if !matches {
+            continue;
+        }
+        let Some(obj) = provider.as_object_mut() else {
+            continue;
+        };
+        let oauth_entry = obj
+            .entry("oauth".to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        if let Some(oauth_obj) = oauth_entry.as_object_mut() {
+            oauth_obj.insert(
+                "access_token".to_string(),
+                serde_json::Value::String(access_token.to_string()),
+            );
+            oauth_obj.insert(
+                "refresh_token".to_string(),
+                serde_json::Value::String(refresh_token.to_string()),
+            );
+            oauth_obj.insert(
+                "expires_at".to_string(),
+                serde_json::Value::from(expires_at_ms),
+            );
+            oauth_obj.insert(
+                "chatgpt_account_id".to_string(),
+                serde_json::Value::String(account_id.to_string()),
+            );
+            updated = true;
+        }
+    }
+
+    if !updated {
+        return false;
+    }
+
+    let serialized = match serde_json::to_string_pretty(&value) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    if let Some(parent) = providers_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let tmp_path = providers_path.with_extension("json.tmp");
+    if std::fs::write(&tmp_path, serialized).is_err() {
+        return false;
+    }
+    std::fs::rename(&tmp_path, &providers_path).is_ok()
+}
+
+/// Pull any locally-rotated codex tokens back into the central store before
+/// overwriting the workspace's `auth.json`. The codex CLI refreshes its own
+/// access/refresh tokens inside the container; without this back-sync the
+/// host file keeps the old (now-revoked) refresh_token, and the next mission
+/// or backend-side `refresh_openai_oauth_token` hits `refresh_token_reused`.
+fn back_propagate_codex_workspace_auth(codex_dir: &std::path::Path, working_dir: &Path) {
+    let Some(local) = read_codex_workspace_auth(codex_dir) else {
+        return;
+    };
+    let Some(local_expires) = local.expires_at_ms else {
+        return;
+    };
+
+    let central_expires = read_oauth_token_entry(ProviderType::OpenAI)
+        .map(|e| e.expires_at)
+        .unwrap_or(i64::MIN);
+    if local_expires <= central_expires {
+        return;
+    }
+
+    // For the central provider store, only update when we can pin the
+    // rotation back to a specific account_id.
+    if let Some(account_id) = local.chatgpt_account_id.as_deref() {
+        if update_provider_oauth_for_chatgpt_account(
+            working_dir,
+            account_id,
+            &local.access_token,
+            &local.refresh_token,
+            local_expires,
+        ) {
+            tracing::info!(
+                codex_dir = %codex_dir.display(),
+                account_id,
+                "Back-propagated codex-rotated OAuth tokens into ai_providers.json"
+            );
+        }
+    }
+
+    // Sync to the canonical tiers (opencode auth.json + sandboxed credential
+    // store) so the next backend-side refresh sees the freshly rotated
+    // refresh_token.
+    if let Err(e) = sync_oauth_to_all_tiers(
+        ProviderType::OpenAI,
+        &local.refresh_token,
+        &local.access_token,
+        local_expires,
+    ) {
+        tracing::warn!(
+            codex_dir = %codex_dir.display(),
+            error = %e,
+            "Failed to back-propagate codex-rotated tokens to central tiers"
+        );
+    }
+}
+
+/// Extract `chatgpt_account_id` from an OpenAI JWT access token.
+fn extract_chatgpt_account_id(jwt: &str) -> Option<String> {
+    let parts: Vec<&str> = jwt.split('.').collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let decoded = URL_SAFE_NO_PAD.decode(parts[1]).ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+    claims
+        .get("https://api.openai.com/auth")
+        .and_then(|auth| auth.get("chatgpt_account_id"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+fn ensure_codex_auth_json(config_dir: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(config_dir)
+        .map_err(|e| format!("Failed to create Codex config dir: {}", e))?;
+
+    let auth_path = config_dir.join("auth.json");
+    if looks_like_json_file(&auth_path) {
+        tracing::debug!(
+            "Codex auth.json already present at {}, leaving as-is",
+            auth_path.display()
+        );
+        return Ok(());
+    }
+
+    if let Some(host_auth) = find_host_codex_auth_json() {
+        // Guard against copying a file onto itself, which can truncate to 0 bytes.
+        let same_file = host_auth == auth_path
+            || match (host_auth.canonicalize(), auth_path.canonicalize()) {
+                (Ok(a), Ok(b)) => a == b,
+                _ => false,
+            };
+
+        if same_file {
+            let home = home_dir();
+            return Err(format!(
+                "Codex auth.json is missing or empty at {}. Run `HOME={} codex login --with-api-key` on the backend host to (re)create ~/.codex/auth.json.",
+                auth_path.display(),
+                home,
+            ));
+        }
+
+        std::fs::copy(&host_auth, &auth_path).map_err(|e| {
+            format!(
+                "Failed to copy host Codex auth.json from {}: {}",
+                host_auth.display(),
+                e
+            )
+        })?;
+        tracing::debug!(
+            "Copied host Codex auth.json from {} to {}",
+            host_auth.display(),
+            auth_path.display()
+        );
+
+        if !looks_like_json_file(&auth_path) {
+            let home = home_dir();
+            return Err(format!(
+                "Copied Codex auth.json to {} but it is still empty/invalid. Run `HOME={} codex login --with-api-key` on the backend host.",
+                auth_path.display(),
+                home,
+            ));
+        }
+
+        return Ok(());
+    }
+
+    let home = home_dir();
+    Err(format!(
+        "No Codex authentication found. Configure an OpenAI API key (Settings → AI Providers) or run `HOME={} codex login --with-api-key` on the backend host, then retry.",
+        home,
+    ))
+}
+
+/// Read the OpenAI OAuth access token from the credential store.
+///
+/// Returns the access token string if found, or None.
+/// Used to pass the token as OPENAI_OAUTH_TOKEN env var to the Codex CLI.
+pub fn read_openai_oauth_access_token() -> Option<String> {
+    read_oauth_token_entry(ProviderType::OpenAI).map(|entry| entry.access_token)
+}
+
+/// Read the Google OAuth access token from the credential store.
+///
+/// Returns the access token string if found and non-empty.
+pub fn read_google_oauth_access_token() -> Option<String> {
+    read_oauth_token_entry(ProviderType::Google)
+        .map(|entry| entry.access_token)
+        .filter(|s| !s.trim().is_empty())
+}
+
+/// One OpenAI ChatGPT-OAuth identity, materialised from `ai_providers.json`,
+/// usable as a rotation slot alongside raw API keys. The `chatgpt_account_id`
+/// is the rotation identity: OpenAI's usage cap is keyed on it, so two
+/// `ai_providers` rows that share a `chatgpt_account_id` are the same bucket
+/// and are de-duplicated by `get_all_openai_oauth_accounts`.
+#[derive(Debug, Clone)]
+pub struct CodexOAuthAccount {
+    pub provider_id: uuid::Uuid,
+    pub chatgpt_account_id: String,
+    pub refresh_token: String,
+    pub access_token: String,
+    pub expires_at: i64,
+    pub account_email: Option<String>,
+    pub priority: u32,
+}
+
+static CODEX_OAUTH_REFRESH_LOCKS: LazyLock<StdMutex<HashMap<String, Arc<AsyncMutex<()>>>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+fn codex_oauth_refresh_lock(account_id: &str) -> Arc<AsyncMutex<()>> {
+    let mut locks = CODEX_OAUTH_REFRESH_LOCKS
+        .lock()
+        .expect("Codex OAuth refresh lock map poisoned");
+    locks
+        .entry(account_id.to_string())
+        .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+        .clone()
+}
+
+fn sanitize_codex_oauth_account_id(account_id: &str) -> String {
+    account_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn shared_codex_oauth_home_for_account(account_id: &str) -> PathBuf {
+    let root = std::env::var("SANDBOXED_SH_CODEX_OAUTH_HOME_ROOT")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(home_dir())
+                .join(".sandboxed-sh")
+                .join("codex-oauth-accounts")
+        });
+    root.join(sanitize_codex_oauth_account_id(account_id))
+}
+
+fn find_openai_oauth_account_by_chatgpt_account_id(
+    working_dir: &Path,
+    chatgpt_account_id: &str,
+) -> Option<CodexOAuthAccount> {
+    let providers = load_ai_providers(working_dir);
+
+    for p in providers {
+        if p.get("provider_type").and_then(|v| v.as_str()) != Some("openai")
+            || !p.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true)
+        {
+            continue;
+        }
+
+        let Some(oauth) = p.get("oauth").and_then(|o| o.as_object()) else {
+            continue;
+        };
+        let refresh = oauth
+            .get("refresh_token")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let access = oauth
+            .get("access_token")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if refresh.is_empty() || access.is_empty() {
+            continue;
+        }
+
+        let account_id = match extract_chatgpt_account_id(access) {
+            Some(id) => id,
+            None => continue,
+        };
+        if account_id != chatgpt_account_id {
+            continue;
+        }
+
+        let expires_at = extract_jwt_exp_ms(access)
+            .or_else(|| oauth.get("expires_at").and_then(|v| v.as_i64()))
+            .unwrap_or(i64::MAX);
+        return Some(CodexOAuthAccount {
+            provider_id: p
+                .get("id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                .unwrap_or_else(uuid::Uuid::new_v4),
+            chatgpt_account_id: account_id,
+            refresh_token: refresh.to_string(),
+            access_token: access.to_string(),
+            expires_at,
+            account_email: p
+                .get("account_email")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            priority: p.get("priority").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+        });
+    }
+
+    None
+}
+
+fn sync_shared_codex_oauth_auth(account: &CodexOAuthAccount) -> Result<PathBuf, String> {
+    let codex_home = shared_codex_oauth_home_for_account(&account.chatgpt_account_id);
+    write_codex_auth_json_chatgpt_with_tokens(
+        &codex_home,
+        &account.access_token,
+        &account.refresh_token,
+    )?;
+    Ok(codex_home)
+}
+
+/// Return a launch-ready ChatGPT OAuth account for Codex.
+///
+/// The backend re-reads the latest stored tokens under a per-account lock and
+/// refreshes only when the access token is close to expiry. The resulting token
+/// pair is also mirrored into the shared per-account Codex auth home, so any
+/// Codex-managed auth fallback starts from the same current refresh token.
+pub async fn prepare_codex_oauth_account_for_launch(
+    working_dir: &Path,
+    selected: &CodexOAuthAccount,
+) -> Result<CodexOAuthAccount, String> {
+    const MIN_ACCESS_TOKEN_TTL_MS: i64 = 10 * 60 * 1000;
+
+    let lock = codex_oauth_refresh_lock(&selected.chatgpt_account_id);
+    let _guard = lock.lock().await;
+
+    let current = get_all_openai_oauth_accounts(working_dir)
+        .into_iter()
+        .find(|account| account.chatgpt_account_id == selected.chatgpt_account_id)
+        .unwrap_or_else(|| selected.clone());
+
+    let now = chrono::Utc::now().timestamp_millis();
+    if current.expires_at > now + MIN_ACCESS_TOKEN_TTL_MS {
+        let _ = sync_shared_codex_oauth_auth(&current);
+        return Ok(current);
+    }
+
+    let client = reqwest::Client::new();
+    let (access, refresh, expires_at, _id_token) =
+        refresh_openai_oauth_tokens(&client, &current.refresh_token).await?;
+    let refreshed_account_id =
+        extract_chatgpt_account_id(&access).unwrap_or_else(|| current.chatgpt_account_id.clone());
+
+    if refreshed_account_id != current.chatgpt_account_id {
+        tracing::warn!(
+            expected_account_id = %current.chatgpt_account_id,
+            refreshed_account_id = %refreshed_account_id,
+            "OpenAI OAuth refresh returned a different ChatGPT account id"
+        );
+    }
+
+    let updated = update_provider_oauth_for_chatgpt_account(
+        working_dir,
+        &current.chatgpt_account_id,
+        &access,
+        &refresh,
+        expires_at,
+    );
+    if !updated {
+        tracing::warn!(
+            account_id = %current.chatgpt_account_id,
+            "Refreshed Codex OAuth account but could not update ai_providers.json"
+        );
+    }
+
+    let refreshed = CodexOAuthAccount {
+        access_token: access,
+        refresh_token: refresh,
+        expires_at,
+        ..current
+    };
+    let _ = sync_shared_codex_oauth_auth(&refreshed);
+    Ok(refreshed)
+}
+
+pub async fn refresh_codex_oauth_account_for_app_server(
+    working_dir: &Path,
+    previous_account_id: Option<&str>,
+    fallback_account_id: Option<&str>,
+) -> Result<CodexOAuthAccount, String> {
+    let account_id = previous_account_id
+        .filter(|id| !id.trim().is_empty())
+        .or(fallback_account_id)
+        .ok_or_else(|| "Codex requested OAuth refresh without an account id".to_string())?;
+
+    let lock = codex_oauth_refresh_lock(account_id);
+    let _guard = lock.lock().await;
+
+    let current = find_openai_oauth_account_by_chatgpt_account_id(working_dir, account_id)
+        .ok_or_else(|| {
+            format!(
+                "No OpenAI OAuth account found for ChatGPT account {}",
+                account_id
+            )
+        })?;
+
+    let client = reqwest::Client::new();
+    let (access, refresh, expires_at, _id_token) =
+        refresh_openai_oauth_tokens(&client, &current.refresh_token).await?;
+    let refreshed_account_id =
+        extract_chatgpt_account_id(&access).unwrap_or_else(|| current.chatgpt_account_id.clone());
+
+    if refreshed_account_id != current.chatgpt_account_id {
+        tracing::warn!(
+            expected_account_id = %current.chatgpt_account_id,
+            refreshed_account_id = %refreshed_account_id,
+            "OpenAI OAuth app-server refresh returned a different ChatGPT account id"
+        );
+    }
+
+    let updated = update_provider_oauth_for_chatgpt_account(
+        working_dir,
+        &current.chatgpt_account_id,
+        &access,
+        &refresh,
+        expires_at,
+    );
+    if !updated {
+        tracing::warn!(
+            account_id = %current.chatgpt_account_id,
+            "Refreshed Codex OAuth account for app-server but could not update ai_providers.json"
+        );
+    }
+
+    let refreshed = CodexOAuthAccount {
+        access_token: access,
+        refresh_token: refresh,
+        expires_at,
+        ..current
+    };
+    let _ = sync_shared_codex_oauth_auth(&refreshed);
+    Ok(refreshed)
+}
+
+/// Per-attempt credential override passed to `write_codex_credentials_for_workspace`.
+/// The runner builds one of these for each rotation attempt; the legacy
+/// "process-global creds.json" path is the fallback when the override is `None`.
+#[derive(Debug, Clone)]
+pub enum CodexCredentialOverride<'a> {
+    ApiKey(&'a str),
+    OAuth(&'a CodexOAuthAccount),
+}
+
+/// Enumerate all enabled OpenAI ChatGPT-OAuth accounts in `ai_providers.json`,
+/// in priority/created_at order, de-duplicated by `chatgpt_account_id`.
+///
+/// Used by the codex turn rotation loop. Entries without a parseable
+/// `chatgpt_account_id` claim are skipped (we can't rotate over an identity
+/// we can't identify).
+pub fn get_all_openai_oauth_accounts(working_dir: &Path) -> Vec<CodexOAuthAccount> {
+    let providers = load_ai_providers(working_dir);
+
+    let mut entries: Vec<(u32, usize, &serde_json::Value)> = providers
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| {
+            p.get("provider_type").and_then(|v| v.as_str()) == Some("openai")
+                && p.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true)
+        })
+        .map(|(i, p)| {
+            let priority = p.get("priority").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            (priority, i, p)
+        })
+        .collect();
+    entries.sort_by_key(|(p, i, _)| (*p, *i));
+
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut accounts: Vec<CodexOAuthAccount> = Vec::new();
+    for (priority, _, p) in entries {
+        let oauth = match p.get("oauth").and_then(|o| o.as_object()) {
+            Some(o) => o,
+            None => continue,
+        };
+        let refresh = oauth
+            .get("refresh_token")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let access = oauth
+            .get("access_token")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let stored_expires_at = oauth.get("expires_at").and_then(|v| v.as_i64());
+        if refresh.is_empty() || access.is_empty() {
+            continue;
+        }
+        let decoded_expires_at = extract_jwt_exp_ms(access);
+        let expires_at = decoded_expires_at.or(stored_expires_at).unwrap_or(i64::MAX);
+        if (stored_expires_at.is_some() || decoded_expires_at.is_some())
+            && oauth_token_expired(expires_at)
+        {
+            tracing::warn!(
+                provider_id = p.get("id").and_then(|v| v.as_str()).unwrap_or("<unknown>"),
+                account_email = p.get("account_email").and_then(|v| v.as_str()),
+                expires_at,
+                "Skipping expired OpenAI OAuth provider entry for Codex rotation"
+            );
+            continue;
+        }
+        let chatgpt_account_id = match extract_chatgpt_account_id(access) {
+            Some(id) => id,
+            None => {
+                tracing::debug!(
+                    "Skipping OpenAI provider entry: access_token has no chatgpt_account_id claim"
+                );
+                continue;
+            }
+        };
+        if !seen.insert(chatgpt_account_id.clone()) {
+            tracing::debug!(
+                chatgpt_account_id = %chatgpt_account_id,
+                "Skipping duplicate OpenAI OAuth identity"
+            );
+            continue;
+        }
+        let provider_id = p
+            .get("id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+            .unwrap_or_else(uuid::Uuid::new_v4);
+        let account_email = p
+            .get("account_email")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        accounts.push(CodexOAuthAccount {
+            provider_id,
+            chatgpt_account_id,
+            refresh_token: refresh.to_string(),
+            access_token: access.to_string(),
+            expires_at,
+            account_email,
+            priority,
+        });
+    }
+    accounts
+}
+
+/// Write a chatgpt-mode `auth.json` for codex from an explicit OAuth token
+/// pair (instead of reading the canonical single-slot credential store).
+/// Used when the runner is rotating across multiple OAuth identities.
+pub(crate) fn write_codex_auth_json_chatgpt_with_tokens(
+    config_dir: &Path,
+    access_token: &str,
+    refresh_token: &str,
+) -> Result<(), String> {
+    // The current Codex app-server requires the ChatGPT refresh_token to be
+    // present in auth.json. Access-token-only auth can leave the responses
+    // client with no bearer header, producing 401s from the OpenAI API.
+    write_codex_chatgpt_auth_file(
+        config_dir,
+        access_token,
+        refresh_token,
+        "rotation_override",
+        true,
+    )
+}
+
+/// Write Codex credentials to a workspace.
+///
+/// For container workspaces, writes to the container's root home directory.
+/// For host workspaces, writes to the host's home directory.
+pub fn write_codex_credentials_for_workspace(
+    workspace: &crate::workspace::Workspace,
+    working_dir: &Path,
+    override_credential: Option<&CodexCredentialOverride>,
+) -> Result<(), String> {
+    use crate::workspace::WorkspaceType;
+
+    let codex_dir = match workspace.workspace_type {
+        WorkspaceType::Container => {
+            // For container workspaces, write to <workspace_root>/root/.codex
+            workspace.path.join("root").join(".codex")
+        }
+        WorkspaceType::Host => {
+            // For host workspaces, use host home directory
+            let home = home_dir();
+            std::path::PathBuf::from(home).join(".codex")
+        }
+    };
+
+    // Pull any locally-rotated tokens back into the central store before we
+    // overwrite this workspace's auth.json. Codex CLIs refresh in-place inside
+    // their container; without this back-sync the host store keeps the stale
+    // refresh_token forever and the next mission hits `refresh_token_reused`.
+    back_propagate_codex_workspace_auth(&codex_dir, working_dir);
+
+    // Priority 0a: Explicit override (rotation path).
+    match override_credential {
+        Some(CodexCredentialOverride::ApiKey(key)) => {
+            write_codex_auth_json_apikey(&codex_dir, key)?;
+            log_codex_auth_status(workspace, &codex_dir, "api_key_override");
+            tracing::info!(
+                workspace_id = %workspace.id,
+                workspace_type = ?workspace.workspace_type,
+                "Wrote Codex auth.json for workspace (api key, rotation override)"
+            );
+            return Ok(());
+        }
+        Some(CodexCredentialOverride::OAuth(account)) => {
+            write_codex_auth_json_chatgpt_with_tokens(
+                &codex_dir,
+                &account.access_token,
+                &account.refresh_token,
+            )?;
+            log_codex_auth_status(workspace, &codex_dir, "chatgpt_oauth_override");
+            tracing::info!(
+                workspace_id = %workspace.id,
+                workspace_type = ?workspace.workspace_type,
+                provider_id = %account.provider_id,
+                chatgpt_account_id = %account.chatgpt_account_id,
+                "Wrote Codex auth.json for workspace (chatgpt mode, rotation override)"
+            );
+            return Ok(());
+        }
+        None => {}
+    }
+
+    // Priority 1: Use a minted API key if available (no rotation context).
+    if let Some(api_key) = get_openai_api_key_for_codex_default(working_dir) {
+        write_codex_auth_json_apikey(&codex_dir, &api_key)?;
+        log_codex_auth_status(workspace, &codex_dir, "api_key");
+        tracing::info!(
+            workspace_id = %workspace.id,
+            workspace_type = ?workspace.workspace_type,
+            "Wrote Codex auth.json for workspace (api key)"
+        );
+        return Ok(());
+    }
+
+    // Priority 2: Use ChatGPT OAuth mode (access_token as Bearer).
+    // This works for ChatGPT Plus/Pro users without an API platform org.
+    if read_oauth_token_entry(ProviderType::OpenAI).is_some() {
+        write_codex_auth_json_chatgpt(&codex_dir)?;
+        log_codex_auth_status(workspace, &codex_dir, "chatgpt_oauth");
+        tracing::info!(
+            workspace_id = %workspace.id,
+            workspace_type = ?workspace.workspace_type,
+            "Wrote Codex auth.json for workspace (chatgpt mode)"
+        );
+        return Ok(());
+    }
+
+    // Priority 3: Copy existing host auth.json verbatim.
+    ensure_codex_auth_json(&codex_dir)?;
+    log_codex_auth_status(workspace, &codex_dir, "host_copy");
+    tracing::info!(
+        workspace_id = %workspace.id,
+        workspace_type = ?workspace.workspace_type,
+        "Ensured Codex auth.json for workspace"
+    );
+    Ok(())
+}
+
+fn log_codex_auth_status(workspace: &crate::workspace::Workspace, codex_dir: &Path, source: &str) {
+    let auth_path = codex_dir.join("auth.json");
+    match std::fs::metadata(&auth_path) {
+        Ok(meta) => {
+            tracing::info!(
+                workspace_id = %workspace.id,
+                workspace_type = ?workspace.workspace_type,
+                source = %source,
+                auth_path = %auth_path.display(),
+                auth_size_bytes = meta.len(),
+                "Codex auth.json present for workspace"
+            );
+        }
+        Err(err) => {
+            tracing::warn!(
+                workspace_id = %workspace.id,
+                workspace_type = ?workspace.workspace_type,
+                source = %source,
+                auth_path = %auth_path.display(),
+                error = %err,
+                "Codex auth.json missing or unreadable after write"
+            );
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Request/Response Types
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub struct ProviderTypeInfo {
+    pub id: String,
+    pub name: String,
+    pub uses_oauth: bool,
+    pub env_var: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateProviderRequest {
+    pub provider_type: ProviderType,
+    pub name: String,
+    /// Optional label to distinguish multiple accounts of the same provider type
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Priority order for fallback chains (lower = higher priority)
+    #[serde(default)]
+    pub priority: Option<u32>,
+    /// Optional Google Cloud project ID (for Google provider)
+    #[serde(default)]
+    pub google_project_id: Option<String>,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Which backends this provider is used for (e.g., ["opencode", "claudecode"])
+    ///
+    /// Stored in `.sandboxed-sh/provider_backends.json` (not in opencode.json).
+    ///
+    /// Defaults to ["opencode"].
+    #[serde(default)]
+    pub use_for_backends: Option<Vec<String>>,
+    /// Custom models for custom providers
+    #[serde(default)]
+    pub custom_models: Option<Vec<crate::ai_providers::CustomModel>>,
+    /// Custom environment variable name for API key (for custom providers)
+    #[serde(default)]
+    pub custom_env_var: Option<String>,
+    /// NPM package for custom provider (defaults to @ai-sdk/openai-compatible)
+    #[serde(default)]
+    pub npm_package: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateProviderRequest {
+    pub name: Option<String>,
+    /// Optional label to distinguish multiple accounts of the same provider type
+    pub label: Option<Option<String>>,
+    /// Priority order for fallback chains (lower = higher priority)
+    pub priority: Option<u32>,
+    /// Optional Google Cloud project ID update (for Google provider)
+    pub google_project_id: Option<Option<String>>,
+    pub api_key: Option<Option<String>>,
+    pub base_url: Option<Option<String>>,
+    pub enabled: Option<bool>,
+    /// Which backends this provider is used for (e.g., ["opencode", "claudecode"])
+    pub use_for_backends: Option<Vec<String>>,
+    /// Custom models for custom providers
+    pub custom_models: Option<Vec<crate::ai_providers::CustomModel>>,
+    /// Custom environment variable name for API key (for custom providers)
+    pub custom_env_var: Option<Option<String>>,
+    /// NPM package for custom provider
+    pub npm_package: Option<Option<String>>,
+    /// Account identifier (email) — set by frontend when server-side userinfo fails
+    pub account_email: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProviderResponse {
+    pub id: String,
+    pub provider_type: ProviderType,
+    pub provider_type_name: String,
+    pub name: String,
+    /// Optional label to distinguish multiple accounts of the same provider type
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Priority order for fallback chains (lower = higher priority)
+    #[serde(default)]
+    pub priority: u32,
+    pub google_project_id: Option<String>,
+    pub has_api_key: bool,
+    pub has_oauth: bool,
+    pub base_url: Option<String>,
+    /// Custom models for custom providers
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_models: Option<Vec<crate::ai_providers::CustomModel>>,
+    /// Custom environment variable name for API key
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_env_var: Option<String>,
+    /// NPM package for custom provider
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub npm_package: Option<String>,
+    pub enabled: bool,
+    pub is_default: bool,
+    pub uses_oauth: bool,
+    pub auth_methods: Vec<AuthMethod>,
+    pub status: ProviderStatusResponse,
+    /// Which backends this provider is used for (e.g., ["opencode", "claudecode"])
+    pub use_for_backends: Vec<String>,
+    /// Account identifier (email or username) from the connected OAuth account
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_email: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum ProviderStatusResponse {
+    Unknown,
+    Connected,
+    NeedsAuth {
+        auth_url: Option<String>,
+    },
+    /// OAuth refresh token expired - user must re-authenticate to continue
+    NeedsReauth {
+        reason: String,
+        auth_url: Option<String>,
+    },
+    Error {
+        message: String,
+    },
+}
+
+impl ProviderStatusResponse {
+    /// Convert from internal ProviderStatus to API response format.
+    ///
+    /// This ensures the NeedsReauth variant is properly mapped when
+    /// the OAuth refresh loop detects expired tokens.
+    ///
+    /// # Example Usage (future OAuth refresh implementation)
+    /// ```ignore
+    /// // In OAuth refresh loop when invalid_grant is detected:
+    /// provider.status = ProviderStatus::NeedsReauth(
+    ///     "Refresh token expired - please re-authenticate".to_string()
+    /// );
+    /// ```
+    #[allow(dead_code)]
+    fn from_provider_status(
+        status: &crate::ai_providers::ProviderStatus,
+        auth_url: Option<String>,
+    ) -> Self {
+        use crate::ai_providers::ProviderStatus;
+        match status {
+            ProviderStatus::Unknown => ProviderStatusResponse::Unknown,
+            ProviderStatus::Connected => ProviderStatusResponse::Connected,
+            ProviderStatus::NeedsAuth => ProviderStatusResponse::NeedsAuth { auth_url },
+            ProviderStatus::NeedsReauth(reason) => ProviderStatusResponse::NeedsReauth {
+                reason: reason.clone(),
+                auth_url,
+            },
+            ProviderStatus::Error(msg) => ProviderStatusResponse::Error {
+                message: msg.clone(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthKind {
+    ApiKey,
+    OAuth,
+}
+
+#[derive(Debug, Clone)]
+struct ProviderConfigEntry {
+    name: Option<String>,
+    base_url: Option<String>,
+    enabled: Option<bool>,
+    google_project_id: Option<String>,
+}
+
+fn build_provider_response(
+    provider_type: ProviderType,
+    config: Option<ProviderConfigEntry>,
+    auth: Option<AuthKind>,
+    default_provider: Option<ProviderType>,
+    backends: Option<Vec<String>>,
+    account_email: Option<String>,
+) -> ProviderResponse {
+    let now = chrono::Utc::now();
+    let name = config
+        .as_ref()
+        .and_then(|c| c.name.clone())
+        .unwrap_or_else(|| provider_type.display_name().to_string());
+    let base_url = config.as_ref().and_then(|c| c.base_url.clone());
+    let enabled = config.as_ref().and_then(|c| c.enabled).unwrap_or(true);
+    let google_project_id = config.as_ref().and_then(|c| c.google_project_id.clone());
+    let is_default = default_provider
+        .map(|p| p == provider_type)
+        .unwrap_or(false);
+    let status = match auth {
+        Some(AuthKind::ApiKey) | Some(AuthKind::OAuth) => ProviderStatusResponse::Connected,
+        None => ProviderStatusResponse::NeedsAuth { auth_url: None },
+    };
+
+    // Most providers are only usable via OpenCode, but we still store and render
+    // `use_for_backends` generically so the UI can express intent and we can grow
+    // support without special-casing a single provider forever.
+    let use_for_backends = backends.unwrap_or_else(|| default_backends_for_provider(provider_type));
+
+    ProviderResponse {
+        id: provider_type.id().to_string(),
+        provider_type,
+        provider_type_name: provider_type.display_name().to_string(),
+        name,
+        label: None,
+        priority: 0,
+        google_project_id,
+        has_api_key: matches!(auth, Some(AuthKind::ApiKey)),
+        has_oauth: matches!(auth, Some(AuthKind::OAuth)),
+        base_url,
+        custom_models: None,
+        custom_env_var: None,
+        npm_package: None,
+        enabled,
+        is_default,
+        uses_oauth: provider_type.uses_oauth(),
+        auth_methods: provider_type.auth_methods(),
+        status,
+        use_for_backends,
+        account_email,
+        created_at: now,
+        updated_at: now,
+    }
+}
+
+/// Build a ProviderResponse from an AIProvider store entry.
+/// Used for all provider types now that everything is stored in AIProviderStore.
+fn build_response_from_store(provider: &crate::ai_providers::AIProvider) -> ProviderResponse {
+    let pt = provider.provider_type;
+    let has_api_key = provider.api_key.is_some();
+    let has_oauth = provider.oauth.is_some();
+    let oauth_expired = provider
+        .oauth
+        .as_ref()
+        .is_some_and(|oauth| oauth_token_expired(oauth.expires_at));
+    let status = if pt == ProviderType::Xai && has_oauth && !has_api_key && oauth_expired {
+        ProviderStatusResponse::NeedsReauth {
+            reason: "xAI OAuth token expired; reconnect Grok Build".to_string(),
+            auth_url: None,
+        }
+    } else if has_api_key || has_oauth || provider.base_url.is_some() {
+        ProviderStatusResponse::Connected
+    } else {
+        ProviderStatusResponse::NeedsAuth { auth_url: None }
+    };
+    let use_for_backends = provider
+        .use_for_backends
+        .clone()
+        .unwrap_or_else(|| default_backends_for_provider(pt));
+
+    ProviderResponse {
+        id: provider.id.to_string(),
+        provider_type: pt,
+        provider_type_name: pt.display_name().to_string(),
+        name: provider.name.clone(),
+        label: provider.label.clone(),
+        priority: provider.priority,
+        google_project_id: provider.google_project_id.clone(),
+        has_api_key,
+        has_oauth,
+        base_url: provider.base_url.clone(),
+        custom_models: provider.custom_models.clone(),
+        custom_env_var: provider.custom_env_var.clone(),
+        npm_package: provider.npm_package.clone(),
+        enabled: provider.enabled,
+        is_default: provider.is_default,
+        uses_oauth: pt.uses_oauth(),
+        auth_methods: pt.auth_methods(),
+        status,
+        use_for_backends,
+        account_email: provider.account_email.clone(),
+        created_at: provider.created_at,
+        updated_at: provider.updated_at,
+    }
+}
+
+/// Sync the highest-priority enabled provider of a given type from the store
+/// to opencode.json and auth.json for runtime consumption by OpenCode.
+async fn sync_store_to_opencode(
+    store: &crate::ai_providers::AIProviderStore,
+    working_dir: &Path,
+    provider_type: ProviderType,
+) {
+    let providers = store.get_all_by_type(provider_type).await;
+    let active = providers.first(); // already sorted by priority
+
+    let config_path = get_opencode_config_path(working_dir);
+    let mut opencode_config = match read_opencode_config(&config_path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("Failed to read opencode config for sync: {}", e);
+            return;
+        }
+    };
+
+    if let Some(provider) = active {
+        // Sync provider config entry to opencode.json
+        set_provider_config_entry(
+            &mut opencode_config,
+            provider_type,
+            Some(provider.name.clone()),
+            Some(provider.base_url.clone()),
+            Some(provider.enabled),
+            provider.use_for_backends.clone(),
+            provider.google_project_id.clone().map(Some),
+        );
+        if let Err(e) = write_opencode_config(&config_path, &opencode_config) {
+            tracing::error!("Failed to write opencode config during sync: {}", e);
+        }
+
+        // Sync credentials to auth.json
+        if let Some(ref key) = provider.api_key {
+            if let Err(e) = sync_api_key_to_opencode_auth(provider_type, key) {
+                tracing::error!("Failed to sync API key to OpenCode during sync: {}", e);
+            }
+        }
+        if let Some(ref oauth) = provider.oauth {
+            if let Err(e) = sync_to_opencode_auth(
+                provider_type,
+                &oauth.refresh_token,
+                &oauth.access_token,
+                oauth.expires_at,
+            ) {
+                tracing::error!("Failed to sync OAuth to OpenCode during sync: {}", e);
+            }
+        }
+
+        // Sync backends
+        let backends = provider
+            .use_for_backends
+            .clone()
+            .unwrap_or_else(|| default_backends_for_provider(provider_type));
+        if let Err(e) = update_provider_backends(working_dir, provider_type.id(), backends) {
+            tracing::error!("Failed to sync provider backends during sync: {}", e);
+        }
+
+        // Sync account email
+        if let Some(ref email) = provider.account_email {
+            if let Err(e) = update_provider_account(working_dir, provider_type.id(), email.clone())
+            {
+                tracing::error!("Failed to sync provider account during sync: {}", e);
+            }
+        }
+    } else {
+        // No providers of this type - remove from opencode.json
+        remove_provider_config_entry(&mut opencode_config, provider_type);
+        if let Err(e) = write_opencode_config(&config_path, &opencode_config) {
+            tracing::error!("Failed to write opencode config during sync removal: {}", e);
+        }
+        if let Err(e) = remove_opencode_auth_entry(provider_type) {
+            tracing::error!("Failed to remove OpenCode auth entry during sync: {}", e);
+        }
+        let _ = remove_provider_backends(working_dir, provider_type.id());
+        let _ = remove_provider_account(working_dir, provider_type.id());
+    }
+}
+
+/// Migrate standard providers from opencode.json + auth.json into the AIProviderStore.
+/// Called on first list to ensure existing setups continue working.
+async fn migrate_opencode_providers_to_store(
+    store: &crate::ai_providers::AIProviderStore,
+    working_dir: &Path,
+) {
+    let config_path = get_opencode_config_path(working_dir);
+    let opencode_config = match read_opencode_config(&config_path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let auth_map = read_opencode_auth_map().unwrap_or_default();
+    let backends_state = read_provider_backends_state(working_dir);
+    let accounts_state = read_provider_accounts_state(working_dir);
+
+    let provider_map = match opencode_config.get("provider").and_then(|v| v.as_object()) {
+        Some(m) => m.clone(),
+        None => return,
+    };
+
+    for (key, _entry) in &provider_map {
+        let Some(provider_type) = ProviderType::from_id(key) else {
+            continue;
+        };
+        // Skip Custom (already in store) and skip if already in store
+        if provider_type == ProviderType::Custom {
+            continue;
+        }
+        let existing = store.get_all_by_type(provider_type).await;
+        if !existing.is_empty() {
+            continue;
+        }
+
+        // Create store entry from opencode.json + auth.json
+        let config_entry = get_provider_config_entry(&opencode_config, provider_type);
+        let name = config_entry
+            .as_ref()
+            .and_then(|c| c.name.clone())
+            .unwrap_or_else(|| provider_type.display_name().to_string());
+
+        let mut provider = crate::ai_providers::AIProvider::new(provider_type, name);
+        provider.base_url = config_entry.as_ref().and_then(|c| c.base_url.clone());
+        provider.google_project_id = config_entry
+            .as_ref()
+            .and_then(|c| c.google_project_id.clone());
+        provider.use_for_backends = backends_state.get(provider_type.id()).cloned();
+        provider.account_email = accounts_state.get(provider_type.id()).cloned();
+
+        // Check auth.json for credentials
+        if let Some(auth_kind) = auth_map.get(&provider_type) {
+            match auth_kind {
+                AuthKind::ApiKey => {
+                    // Read the actual key from auth.json
+                    if let Ok(auth) = read_opencode_auth() {
+                        if let Some(auth_entry) = auth.get(provider_type.id()) {
+                            let key = auth_entry
+                                .get("key")
+                                .or_else(|| auth_entry.get("api_key"))
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                            provider.api_key = key;
+                        }
+                    }
+                }
+                AuthKind::OAuth => {
+                    // Read OAuth credentials from auth.json
+                    if let Ok(auth) = read_opencode_auth() {
+                        if let Some(auth_entry) = auth.get(provider_type.id()) {
+                            let refresh = auth_entry
+                                .get("refresh")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string();
+                            let access = auth_entry
+                                .get("access")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string();
+                            let expires = auth_entry
+                                .get("expires")
+                                .and_then(|v| v.as_i64())
+                                .unwrap_or(0);
+                            provider.oauth = Some(crate::ai_providers::OAuthCredentials {
+                                refresh_token: refresh,
+                                access_token: access,
+                                expires_at: expires,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        tracing::info!(
+            "Migrating provider {} from opencode.json to AIProviderStore",
+            provider_type.id()
+        );
+        store.add(provider).await;
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuthResponse {
+    pub success: bool,
+    pub message: String,
+    /// OAuth URL to redirect user to (if OAuth flow required)
+    pub auth_url: Option<String>,
+}
+
+/// Response for provider credentials for a specific backend.
+#[derive(Debug, Serialize)]
+pub struct BackendProviderResponse {
+    /// Whether a provider is configured for this backend
+    pub configured: bool,
+    /// The provider type (e.g., "anthropic")
+    pub provider_type: Option<String>,
+    /// The provider name
+    pub provider_name: Option<String>,
+    /// Deprecated: raw API keys are no longer returned by this status endpoint.
+    pub api_key: Option<String>,
+    /// Deprecated: raw OAuth tokens are no longer returned by this status endpoint.
+    pub oauth: Option<BackendOAuthCredentials>,
+    /// Whether the provider has valid credentials
+    pub has_credentials: bool,
+    /// Credential type configured for this backend, without secret material.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_method: Option<String>,
+}
+
+/// OAuth credentials for backend provider.
+#[derive(Debug, Serialize)]
+pub struct BackendOAuthCredentials {
+    pub access_token: String,
+    pub refresh_token: String,
+    pub expires_at: i64,
+}
+
+fn backend_auth_status_from_entry(
+    auth_entry: Option<&serde_json::Value>,
+) -> (Option<String>, bool) {
+    let Some(auth_entry) = auth_entry else {
+        return (None, false);
+    };
+
+    let auth_type = auth_entry.get("type").and_then(|v| v.as_str());
+    match auth_type {
+        Some("api_key") | Some("api") => (Some("api_key".to_string()), true),
+        Some("oauth") => (Some("oauth".to_string()), true),
+        _ => {
+            if auth_entry.get("refresh").is_some() {
+                (Some("oauth".to_string()), true)
+            } else if auth_entry.get("key").is_some() || auth_entry.get("api_key").is_some() {
+                (Some("api_key".to_string()), true)
+            } else {
+                (None, false)
+            }
+        }
+    }
+}
+
+/// Request to initiate OAuth authorization.
+#[derive(Debug, Deserialize)]
+pub struct OAuthAuthorizeRequest {
+    /// Index of the auth method to use (0-indexed)
+    pub method_index: usize,
+}
+
+/// Response from OAuth authorization initiation.
+#[derive(Debug, Serialize)]
+pub struct OAuthAuthorizeResponse {
+    /// URL to redirect user to for authorization
+    pub url: String,
+    /// Instructions to show the user
+    pub instructions: String,
+    /// Method for callback: "code" means user pastes code
+    pub method: String,
+}
+
+/// Request to exchange OAuth code for credentials.
+#[derive(Debug, Deserialize)]
+pub struct OAuthCallbackRequest {
+    /// Index of the auth method used
+    pub method_index: usize,
+    /// Authorization code from the OAuth flow
+    pub code: String,
+    /// Which backends to use this provider for (e.g., ["opencode", "claudecode"])
+    pub use_for_backends: Option<Vec<String>>,
+}
+
+/// Request to set OpenCode auth credentials directly.
+#[derive(Debug, Deserialize)]
+pub struct SetOpenCodeAuthRequest {
+    /// Provider type (e.g., "anthropic")
+    pub provider: String,
+    /// Refresh token
+    pub refresh_token: String,
+    /// Access token
+    pub access_token: String,
+    /// Token expiry timestamp in milliseconds
+    pub expires_at: i64,
+}
+
+/// Response for OpenCode auth operations.
+#[derive(Debug, Serialize)]
+pub struct OpenCodeAuthResponse {
+    pub success: bool,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth: Option<serde_json::Value>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OpenCode Auth Sync
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Sync OAuth credentials to OpenCode's auth.json file.
+///
+/// OpenCode stores auth in `~/.local/share/opencode/auth.json` with format:
+/// ```json
+/// {
+///   "anthropic": {
+///     "type": "oauth",
+///     "refresh": "sk-ant-ort01-...",
+///     "access": "sk-ant-oat01-...",
+///     "expires": 1767743285144
+///   }
+/// }
+/// ```
+fn sync_to_opencode_auth(
+    provider_type: ProviderType,
+    refresh_token: &str,
+    access_token: &str,
+    expires_at: i64,
+) -> Result<(), String> {
+    let auth_path = get_opencode_auth_path();
+
+    // Ensure parent directory exists
+    if let Some(parent) = auth_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create OpenCode auth directory: {}", e))?;
+    }
+
+    // Read existing auth or start fresh
+    let mut auth: serde_json::Map<String, serde_json::Value> = if auth_path.exists() {
+        let contents = std::fs::read_to_string(&auth_path)
+            .map_err(|e| format!("Failed to read OpenCode auth: {}", e))?;
+        serde_json::from_str(&contents).unwrap_or_default()
+    } else {
+        serde_json::Map::new()
+    };
+
+    // Map our provider type to OpenCode's key(s)
+    let keys = opencode_auth_keys(provider_type);
+    if keys.is_empty() {
+        return Err("Provider does not map to an OpenCode auth key".to_string());
+    }
+
+    // Create the auth entry in OpenCode format
+    let entry = serde_json::json!({
+        "type": "oauth",
+        "refresh": refresh_token,
+        "access": access_token,
+        "expires": expires_at
+    });
+
+    for key in &keys {
+        auth.insert((*key).to_string(), entry.clone());
+    }
+
+    // Write back to file
+    let contents = serde_json::to_string_pretty(&auth)
+        .map_err(|e| format!("Failed to serialize OpenCode auth: {}", e))?;
+    std::fs::write(&auth_path, contents)
+        .map_err(|e| format!("Failed to write OpenCode auth: {}", e))?;
+
+    if matches!(
+        provider_type,
+        ProviderType::OpenAI | ProviderType::Anthropic | ProviderType::Google
+    ) {
+        if let Err(e) = write_opencode_provider_auth_file(provider_type, &entry) {
+            tracing::error!("Failed to write OpenCode provider auth file: {}", e);
+        }
+    }
+
+    if matches!(provider_type, ProviderType::Xai) {
+        if let Err(e) = write_grok_oauth_auth_file(refresh_token, access_token, expires_at) {
+            tracing::error!("Failed to write Grok OAuth auth file: {}", e);
+        }
+    }
+
+    tracing::info!(
+        "Synced OAuth credentials to OpenCode auth.json for provider keys: {:?}",
+        keys
+    );
+
+    // Also write to sandboxed.sh's canonical credential store
+    if let Err(e) =
+        write_sandboxed_credential(provider_type, refresh_token, access_token, expires_at)
+    {
+        tracing::warn!("Failed to write sandboxed.sh credentials: {}", e);
+    }
+
+    Ok(())
+}
+
+pub(crate) fn write_grok_oauth_auth_file(
+    refresh_token: &str,
+    access_token: &str,
+    expires_at: i64,
+) -> Result<(), String> {
+    let expires_at = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(expires_at)
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+
+    let mut last_error = None;
+    for auth_path in grok_auth_paths() {
+        let mut auth = if auth_path.exists() {
+            match std::fs::read_to_string(&auth_path)
+                .ok()
+                .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok())
+                .and_then(|value| value.as_object().cloned())
+            {
+                Some(auth) => auth,
+                None => serde_json::Map::new(),
+            }
+        } else {
+            serde_json::Map::new()
+        };
+
+        let mut entry = auth
+            .get(GROK_OAUTH_CLIENT_KEY)
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default();
+        entry.insert(
+            "auth_mode".to_string(),
+            serde_json::Value::String("oauth".to_string()),
+        );
+        entry.insert(
+            "oidc_client_id".to_string(),
+            serde_json::Value::String(GROK_OAUTH_CLIENT_ID.to_string()),
+        );
+        entry.insert(
+            "oidc_issuer".to_string(),
+            serde_json::Value::String("https://auth.x.ai".to_string()),
+        );
+        entry.insert(
+            "key".to_string(),
+            serde_json::Value::String(access_token.to_string()),
+        );
+        entry.insert(
+            "refresh_token".to_string(),
+            serde_json::Value::String(refresh_token.to_string()),
+        );
+        entry.insert(
+            "expires_at".to_string(),
+            serde_json::Value::String(expires_at.clone()),
+        );
+        auth.insert(
+            GROK_OAUTH_CLIENT_KEY.to_string(),
+            serde_json::Value::Object(entry),
+        );
+
+        let write_result = (|| -> Result<(), String> {
+            if let Some(parent) = auth_path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("Failed to create Grok auth directory: {}", e))?;
+            }
+            let contents = serde_json::to_string_pretty(&serde_json::Value::Object(auth))
+                .map_err(|e| format!("Failed to serialize Grok auth: {}", e))?;
+            std::fs::write(&auth_path, contents)
+                .map_err(|e| format!("Failed to write Grok auth: {}", e))?;
+            Ok(())
+        })();
+
+        if let Err(e) = write_result {
+            last_error = Some(format!("{}: {}", auth_path.display(), e));
+        }
+    }
+
+    if let Some(error) = last_error {
+        return Err(error);
+    }
+
+    Ok(())
+}
+
+/// Write Claude Code credentials from explicit values (avoids re-reading from auth.json).
+pub(crate) fn write_claudecode_credentials_from_entry(
+    credentials_dir: &std::path::Path,
+    access_token: &str,
+    refresh_token: &str,
+    expires_at: i64,
+) -> Result<(), String> {
+    let credentials_path = credentials_dir.join(".credentials.json");
+
+    std::fs::create_dir_all(credentials_dir)
+        .map_err(|e| format!("Failed to create Claude credentials directory: {}", e))?;
+
+    // Read-modify-write to preserve other entries in the credentials file
+    let mut credentials: serde_json::Value = if credentials_path.exists() {
+        let existing = std::fs::read_to_string(&credentials_path)
+            .map_err(|e| format!("Failed to read Claude credentials: {}", e))?;
+        serde_json::from_str(&existing).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+
+    credentials["claudeAiOauth"] = serde_json::json!({
+        "accessToken": access_token,
+        "refreshToken": refresh_token,
+        "expiresAt": expires_at,
+        "scopes": ["user:inference", "user:profile", "user:sessions:claude_code"]
+    });
+
+    let contents = serde_json::to_string_pretty(&credentials)
+        .map_err(|e| format!("Failed to serialize Claude credentials: {}", e))?;
+
+    std::fs::write(&credentials_path, contents)
+        .map_err(|e| format!("Failed to write Claude credentials: {}", e))?;
+
+    tracing::info!(
+        path = %credentials_path.display(),
+        expires_at = expires_at,
+        "Synced Claude Code credentials from token refresh"
+    );
+
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+pub struct OAuthTokenEntry {
+    pub refresh_token: String,
+    pub access_token: String,
+    pub expires_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OAuthTokenSource {
+    SandboxedCredentials,
+    OpenCodeAuth,
+    ClaudeCliCredentials,
+}
+
+/// Path to sandboxed.sh's canonical credential store.
+fn get_sandboxed_credentials_path() -> PathBuf {
+    let home = home_dir();
+    PathBuf::from(home)
+        .join(".sandboxed-sh")
+        .join("credentials.json")
+}
+
+/// Read an OAuth credential from sandboxed.sh's canonical credential store.
+/// The file uses the same format as OpenCode's auth.json:
+/// ```json
+/// {
+///   "anthropic": { "type": "oauth", "refresh": "...", "access": "...", "expires": 123 }
+/// }
+/// ```
+fn read_sandboxed_credential(provider_type: ProviderType) -> Option<(OAuthTokenEntry, PathBuf)> {
+    let path = get_sandboxed_credentials_path();
+    if !path.exists() {
+        return None;
+    }
+
+    let contents = std::fs::read_to_string(&path).ok()?;
+    let auth: serde_json::Value = serde_json::from_str(&contents).ok()?;
+
+    for key in opencode_auth_keys(provider_type) {
+        let entry = match auth.get(key) {
+            Some(entry) => entry,
+            None => continue,
+        };
+        if entry.get("type").and_then(|v| v.as_str()) != Some("oauth") {
+            continue;
+        }
+        let refresh_token = match entry.get("refresh").and_then(|v| v.as_str()) {
+            Some(t) => t,
+            None => continue,
+        };
+        let access_token = entry.get("access").and_then(|v| v.as_str()).unwrap_or("");
+        let expires_at = entry.get("expires").and_then(|v| v.as_i64()).unwrap_or(0);
+
+        tracing::debug!(
+            provider = ?provider_type,
+            path = %path.display(),
+            expires_at = expires_at,
+            "Found OAuth token in sandboxed.sh credentials"
+        );
+
+        return Some((
+            OAuthTokenEntry {
+                refresh_token: refresh_token.to_string(),
+                access_token: access_token.to_string(),
+                expires_at,
+            },
+            path,
+        ));
+    }
+
+    None
+}
+
+/// Write an OAuth credential to sandboxed.sh's canonical credential store.
+/// Read-modify-write to preserve entries for other providers.
+fn write_sandboxed_credential(
+    provider_type: ProviderType,
+    refresh_token: &str,
+    access_token: &str,
+    expires_at: i64,
+) -> Result<(), String> {
+    let path = get_sandboxed_credentials_path();
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create ~/.sandboxed-sh directory: {}", e))?;
+    }
+
+    let mut auth: serde_json::Map<String, serde_json::Value> = if path.exists() {
+        let contents = std::fs::read_to_string(&path)
+            .map_err(|e| format!("Failed to read sandboxed.sh credentials: {}", e))?;
+        serde_json::from_str(&contents).unwrap_or_default()
+    } else {
+        serde_json::Map::new()
+    };
+
+    let entry = serde_json::json!({
+        "type": "oauth",
+        "refresh": refresh_token,
+        "access": access_token,
+        "expires": expires_at
+    });
+
+    let keys = opencode_auth_keys(provider_type);
+    for key in &keys {
+        auth.insert((*key).to_string(), entry.clone());
+    }
+
+    let contents = serde_json::to_string_pretty(&auth)
+        .map_err(|e| format!("Failed to serialize sandboxed.sh credentials: {}", e))?;
+    std::fs::write(&path, contents)
+        .map_err(|e| format!("Failed to write sandboxed.sh credentials: {}", e))?;
+
+    tracing::info!(
+        path = %path.display(),
+        keys = ?keys,
+        "Synced OAuth credentials to sandboxed.sh credentials.json"
+    );
+
+    Ok(())
+}
+
+/// Remove a provider entry from sandboxed.sh's credential store.
+fn remove_sandboxed_credential(provider_type: ProviderType) -> Result<(), String> {
+    let path = get_sandboxed_credentials_path();
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let mut auth: serde_json::Map<String, serde_json::Value> = {
+        let contents = std::fs::read_to_string(&path)
+            .map_err(|e| format!("Failed to read sandboxed.sh credentials: {}", e))?;
+        serde_json::from_str(&contents).unwrap_or_default()
+    };
+
+    let keys = opencode_auth_keys(provider_type);
+    let mut changed = false;
+    for key in &keys {
+        if auth.remove(*key).is_some() {
+            changed = true;
+        }
+    }
+
+    if changed {
+        let contents = serde_json::to_string_pretty(&auth)
+            .map_err(|e| format!("Failed to serialize sandboxed.sh credentials: {}", e))?;
+        std::fs::write(&path, contents)
+            .map_err(|e| format!("Failed to write sandboxed.sh credentials: {}", e))?;
+    }
+
+    Ok(())
+}
+
+/// Read Anthropic OAuth credentials from Claude Code's `.credentials.json`.
+/// Checks `$HOME/.claude/.credentials.json` and `/var/lib/opencode/.claude/.credentials.json`.
+/// Parses the `claudeAiOauth` format and converts to `OAuthTokenEntry`.
+fn read_anthropic_from_claude_credentials() -> Option<(OAuthTokenEntry, PathBuf)> {
+    let home = home_dir();
+    let mut candidates = vec![
+        PathBuf::from("/var/lib/opencode")
+            .join(".claude")
+            .join(".credentials.json"),
+        PathBuf::from("/root")
+            .join(".claude")
+            .join(".credentials.json"),
+    ];
+
+    let home_path = PathBuf::from(&home)
+        .join(".claude")
+        .join(".credentials.json");
+    if !candidates.iter().any(|p| p == &home_path) {
+        candidates.push(home_path);
+    }
+
+    for path in candidates {
+        if !path.exists() {
+            continue;
+        }
+        let contents = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let creds: serde_json::Value = match serde_json::from_str(&contents) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let oauth = match creds.get("claudeAiOauth") {
+            Some(v) => v,
+            None => continue,
+        };
+
+        let refresh_token = match oauth.get("refreshToken").and_then(|v| v.as_str()) {
+            Some(t) => t,
+            None => continue,
+        };
+        let access_token = oauth
+            .get("accessToken")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let expires_at = oauth.get("expiresAt").and_then(|v| v.as_i64()).unwrap_or(0);
+        let has_refresh = !refresh_token.trim().is_empty();
+
+        tracing::debug!(
+            path = %path.display(),
+            expires_at = expires_at,
+            has_refresh = has_refresh,
+            "Found Anthropic OAuth token in Claude credentials"
+        );
+
+        return Some((
+            OAuthTokenEntry {
+                refresh_token: refresh_token.to_string(),
+                access_token: access_token.to_string(),
+                expires_at,
+            },
+            path,
+        ));
+    }
+
+    None
+}
+
+pub fn read_oauth_token_entry(provider_type: ProviderType) -> Option<OAuthTokenEntry> {
+    let mut candidates: Vec<(OAuthTokenEntry, OAuthTokenSource, Option<PathBuf>)> = Vec::new();
+
+    // Tier 1: sandboxed.sh's canonical credential store
+    let tier1 = read_sandboxed_credential(provider_type);
+    if let Some((entry, path)) = tier1.clone() {
+        candidates.push((entry, OAuthTokenSource::SandboxedCredentials, Some(path)));
+    }
+
+    // Tier 2: OpenCode auth.json paths (legacy / external auth flows)
+    if let Some((entry, path)) = read_from_opencode_auth_paths(provider_type) {
+        candidates.push((entry, OAuthTokenSource::OpenCodeAuth, Some(path)));
+    }
+
+    // Tier 3: Claude .credentials.json (Anthropic only, from Claude CLI auth)
+    if matches!(provider_type, ProviderType::Anthropic) {
+        if let Some((entry, path)) = read_anthropic_from_claude_credentials() {
+            candidates.push((entry, OAuthTokenSource::ClaudeCliCredentials, Some(path)));
+        }
+    }
+
+    if candidates.is_empty() {
+        tracing::debug!(
+            provider = ?provider_type,
+            "No OAuth token candidates found in any tier"
+        );
+        return None;
+    }
+
+    tracing::debug!(
+        provider = ?provider_type,
+        candidates = candidates
+            .iter()
+            .map(|(entry, source, path)| {
+                format!(
+                    "{:?}@{}(expires_at={})",
+                    source,
+                    path.as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "<none>".to_string()),
+                    entry.expires_at
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+        "Collected OAuth token candidates"
+    );
+
+    // Prefer non-expired tokens; otherwise pick the newest expiry.
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let mut best_idx: usize = 0;
+    let mut best_is_fresh = false;
+    let mut best_expires = i64::MIN;
+
+    for (idx, (entry, _, _)) in candidates.iter().enumerate() {
+        let is_fresh = !oauth_token_expired(entry.expires_at);
+        let expires = entry.expires_at;
+
+        if is_fresh && !best_is_fresh {
+            best_idx = idx;
+            best_is_fresh = true;
+            best_expires = expires;
+            continue;
+        }
+
+        if is_fresh == best_is_fresh && expires > best_expires {
+            best_idx = idx;
+            best_expires = expires;
+        }
+    }
+
+    let (selected, source, path) = candidates.remove(best_idx);
+
+    let refresh_prefix = if selected.refresh_token.len() > 4 {
+        &selected.refresh_token[..4]
+    } else {
+        &selected.refresh_token
+    };
+
+    tracing::debug!(
+        provider = ?provider_type,
+        source = ?source,
+        expires_at = selected.expires_at,
+        now_ms = now_ms,
+        refresh_prefix = %refresh_prefix,
+        "Selected OAuth token source (token prefix for correlation only)"
+    );
+
+    // If we selected a non-canonical source, sync it back to the canonical store.
+    if source != OAuthTokenSource::SandboxedCredentials {
+        if let Some((tier1_entry, _tier1_path)) = tier1 {
+            if tier1_entry.refresh_token != selected.refresh_token {
+                tracing::warn!(
+                    provider = ?provider_type,
+                    source = ?source,
+                    expires_at = selected.expires_at,
+                    "Canonical OAuth refresh token differs from selected source; syncing canonical store"
+                );
+            }
+        }
+
+        if let Err(e) = write_sandboxed_credential(
+            provider_type,
+            &selected.refresh_token,
+            &selected.access_token,
+            selected.expires_at,
+        ) {
+            tracing::warn!(
+                provider = ?provider_type,
+                source = ?source,
+                error = %e,
+                "Failed to sync selected OAuth token to canonical store"
+            );
+        } else if let Some(path) = path {
+            tracing::info!(
+                provider = ?provider_type,
+                source = ?source,
+                path = %path.display(),
+                "Synced OAuth token from non-canonical source to canonical store"
+            );
+        }
+    }
+
+    Some(selected)
+}
+
+/// Read an OAuth token entry from OpenCode auth.json paths (tier 2 fallback).
+fn read_from_opencode_auth_paths(
+    provider_type: ProviderType,
+) -> Option<(OAuthTokenEntry, PathBuf)> {
+    let auth_paths = get_all_opencode_auth_paths();
+
+    for auth_path in auth_paths {
+        if !auth_path.exists() {
+            continue;
+        }
+
+        let contents = match std::fs::read_to_string(&auth_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        let auth: serde_json::Value = match serde_json::from_str(&contents) {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
+
+        for key in opencode_auth_keys(provider_type) {
+            let entry = match auth.get(key) {
+                Some(entry) => entry,
+                None => continue,
+            };
+            let auth_type = entry.get("type").and_then(|v| v.as_str());
+            if auth_type != Some("oauth") {
+                continue;
+            }
+
+            let refresh_token = match entry.get("refresh").and_then(|v| v.as_str()) {
+                Some(t) => t,
+                None => continue,
+            };
+            let access_token = entry.get("access").and_then(|v| v.as_str()).unwrap_or("");
+            let expires_at = entry.get("expires").and_then(|v| v.as_i64()).unwrap_or(0);
+
+            tracing::debug!(
+                provider = ?provider_type,
+                auth_path = %auth_path.display(),
+                expires_at = expires_at,
+                "Found OAuth token entry in OpenCode auth"
+            );
+
+            return Some((
+                OAuthTokenEntry {
+                    refresh_token: refresh_token.to_string(),
+                    access_token: access_token.to_string(),
+                    expires_at,
+                },
+                auth_path,
+            ));
+        }
+    }
+
+    None
+}
+
+/// Get all potential OpenCode auth.json paths to search.
+fn get_all_opencode_auth_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    if let Ok(data_home) = std::env::var("XDG_DATA_HOME") {
+        paths.push(PathBuf::from(data_home).join("opencode").join("auth.json"));
+    }
+
+    let home = home_dir();
+    paths.push(
+        PathBuf::from(&home)
+            .join(".local")
+            .join("share")
+            .join("opencode")
+            .join("auth.json"),
+    );
+
+    // OpenCode server's auth path (runs as opencode user)
+    paths.push(
+        PathBuf::from("/var/lib/opencode")
+            .join(".local")
+            .join("share")
+            .join("opencode")
+            .join("auth.json"),
+    );
+
+    paths
+}
+
+pub fn oauth_token_expired(expires_at: i64) -> bool {
+    let now = chrono::Utc::now().timestamp_millis();
+    let buffer = 5 * 60 * 1000; // 5 minutes in milliseconds
+    expires_at < (now + buffer)
+}
+
+fn is_oauth_token_expired(provider_type: ProviderType) -> bool {
+    read_oauth_token_entry(provider_type)
+        .map(|entry| oauth_token_expired(entry.expires_at))
+        .unwrap_or(false)
+}
+
+/// Check if the Anthropic OAuth token is expired or about to expire.
+/// Returns true if the token is expired or will expire in the next 5 minutes.
+fn is_anthropic_oauth_token_expired() -> bool {
+    is_oauth_token_expired(ProviderType::Anthropic)
+}
+
+/// Get the path to the OAuth refresh lock file for a provider.
+fn get_oauth_refresh_lock_path(provider_type: ProviderType) -> PathBuf {
+    let home = home_dir();
+    let provider_name = match provider_type {
+        ProviderType::Anthropic => "anthropic",
+        ProviderType::OpenAI => "openai",
+        ProviderType::Google => "google",
+        other => {
+            // For providers without OAuth support, use debug name as fallback
+            return PathBuf::from(home)
+                .join(".sandboxed-sh")
+                .join(format!("{:?}_oauth_refresh.lock", other).to_lowercase());
+        }
+    };
+    PathBuf::from(home)
+        .join(".sandboxed-sh")
+        .join(format!("{}_oauth_refresh.lock", provider_name))
+}
+
+/// Acquire an exclusive lock for OAuth token refresh to prevent race conditions.
+/// Returns a File handle that should be dropped when the lock is no longer needed.
+fn acquire_oauth_refresh_lock(provider_type: ProviderType) -> Result<std::fs::File, String> {
+    let lock_path = get_oauth_refresh_lock_path(provider_type);
+
+    // Ensure parent directory exists
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create lock directory: {}", e))?;
+    }
+
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| format!("Failed to open lock file: {}", e))?;
+
+    // Try to acquire exclusive lock with timeout
+    lock_file
+        .try_lock_exclusive()
+        .map_err(|_| "Another process is currently refreshing the token".to_string())?;
+
+    tracing::debug!(
+        provider = ?provider_type,
+        lock_path = %lock_path.display(),
+        "Acquired OAuth refresh lock"
+    );
+
+    Ok(lock_file)
+}
+
+/// Refresh the Anthropic OAuth token using the refresh token.
+/// Updates auth.json with the new access token and expiry.
+/// Uses file-based locking to prevent concurrent refresh attempts.
+pub async fn refresh_anthropic_oauth_token() -> Result<(), String> {
+    refresh_anthropic_oauth_token_inner(false).await
+}
+
+async fn refresh_anthropic_oauth_token_inner(force: bool) -> Result<(), String> {
+    // Acquire exclusive lock to prevent race conditions
+    let _lock = match acquire_oauth_refresh_lock(ProviderType::Anthropic) {
+        Ok(lock) => lock,
+        Err(e) => {
+            tracing::info!(
+                "Could not acquire refresh lock: {}. Waiting for other process to complete...",
+                e
+            );
+            // Another process is refreshing. Wait a bit and check if token is now fresh.
+            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+            // Re-check if token is still expired or missing
+            if let Some(entry) = read_oauth_token_entry(ProviderType::Anthropic) {
+                if !oauth_token_expired(entry.expires_at) {
+                    tracing::info!("Token was refreshed by another process");
+                    return Ok(());
+                }
+            } else {
+                // Token was deleted by another process after invalid_grant
+                return Err("No Anthropic OAuth entry after waiting for refresh".to_string());
+            }
+
+            // Try one more time to acquire the lock
+            acquire_oauth_refresh_lock(ProviderType::Anthropic)?
+        }
+    };
+
+    // Double-check token is still expired (another process might have refreshed it)
+    let entry = read_oauth_token_entry(ProviderType::Anthropic)
+        .ok_or_else(|| "No Anthropic OAuth entry found".to_string())?;
+
+    if !force && !oauth_token_expired(entry.expires_at) {
+        tracing::info!("Token is no longer expired, skipping refresh");
+        return Ok(());
+    }
+
+    let refresh_token = entry.refresh_token.clone();
+    let refresh_token_prefix = if refresh_token.len() > 12 {
+        &refresh_token[..12]
+    } else {
+        &refresh_token
+    };
+
+    tracing::info!(
+        "Refreshing Anthropic OAuth token (refresh_token prefix: {}..., expires_at: {})",
+        refresh_token_prefix,
+        chrono::DateTime::from_timestamp_millis(entry.expires_at)
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_else(|| "invalid".to_string())
+    );
+
+    // Exchange refresh token for new access token
+    let client = reqwest::Client::new();
+    let token_response = client
+        .post("https://console.anthropic.com/v1/oauth/token")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", &refresh_token),
+            ("client_id", ANTHROPIC_CLIENT_ID),
+        ])
+        .send()
+        .await
+        .map_err(|e| format!("Failed to refresh token: {}", e))?;
+
+    if !token_response.status().is_success() {
+        let status = token_response.status();
+        let error_text = token_response.text().await.unwrap_or_default();
+        tracing::error!(
+            "Token refresh failed with status {}: {}",
+            status,
+            error_text
+        );
+        let lower = error_text.to_lowercase();
+        if (status == reqwest::StatusCode::BAD_REQUEST
+            || status == reqwest::StatusCode::UNAUTHORIZED)
+            && lower.contains("invalid_grant")
+        {
+            // Before deleting credentials, check if another process just refreshed the token.
+            // Anthropic rotates refresh tokens, so an unchanged token is still the revoked one
+            // even if its local expiry timestamp is in the future.
+            tracing::warn!(
+                "Received invalid_grant error. Checking if token was recently refreshed..."
+            );
+
+            // Wait a moment and re-read credentials
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+            // Re-read token entry to see if it was updated.
+            if let Some(updated_entry) = read_oauth_token_entry(ProviderType::Anthropic) {
+                let token_changed = updated_entry.refresh_token != refresh_token
+                    || updated_entry.access_token != entry.access_token;
+                if token_changed && !oauth_token_expired(updated_entry.expires_at) {
+                    tracing::info!("Token was refreshed by another process after invalid_grant");
+                    return Ok(());
+                }
+            }
+
+            // Token is genuinely invalid - delete it
+            tracing::error!("Refresh token is genuinely invalid. Removing credentials.");
+            if let Err(e) = remove_opencode_auth_entry(ProviderType::Anthropic) {
+                tracing::warn!(
+                    "Failed to clear Anthropic auth entry after invalid_grant: {}",
+                    e
+                );
+            }
+        }
+        return Err(format!(
+            "Token refresh failed ({}): {}. You may need to re-authenticate.",
+            status, error_text
+        ));
+    }
+
+    let token_data: serde_json::Value = token_response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse token response: {}", e))?;
+
+    let new_access_token = token_data["access_token"]
+        .as_str()
+        .ok_or_else(|| "No access token in refresh response".to_string())?;
+
+    // Anthropic uses rotating refresh tokens - each refresh returns a NEW refresh token
+    // and invalidates the old one. If no refresh_token is returned, this is an error.
+    let new_refresh_token = token_data["refresh_token"].as_str().ok_or_else(|| {
+        tracing::error!(
+            "Anthropic token refresh response missing refresh_token. Response: {:?}",
+            token_data
+        );
+        "No refresh_token in Anthropic OAuth response - tokens may be rotating".to_string()
+    })?;
+
+    let expires_in = token_data["expires_in"].as_i64().unwrap_or(3600);
+    let expires_at = chrono::Utc::now().timestamp_millis() + (expires_in * 1000);
+
+    let new_refresh_prefix = if new_refresh_token.len() > 4 {
+        &new_refresh_token[..4]
+    } else {
+        new_refresh_token
+    };
+
+    tracing::debug!(
+        "Received new tokens from Anthropic (new refresh_token prefix: {}..., expires_in: {}s)",
+        new_refresh_prefix,
+        expires_in
+    );
+
+    // **Solution #3: Sync to all storage tiers atomically**
+    sync_oauth_to_all_tiers(
+        ProviderType::Anthropic,
+        new_refresh_token,
+        new_access_token,
+        expires_at,
+    )?;
+
+    tracing::info!(
+        "Successfully refreshed Anthropic OAuth token, expires in {} seconds",
+        expires_in
+    );
+
+    Ok(())
+}
+
+/// Exchange an Anthropic refresh token for fresh credentials.
+///
+/// Pure HTTP exchange — no side effects on any credential store. Callers are
+/// responsible for persisting the returned credentials wherever they're
+/// needed (per-provider record, opencode auth.json, etc.).
+pub async fn exchange_anthropic_refresh_token(
+    refresh_token: &str,
+) -> Result<crate::ai_providers::OAuthCredentials, String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post("https://console.anthropic.com/v1/oauth/token")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+            ("client_id", ANTHROPIC_CLIENT_ID),
+        ])
+        .send()
+        .await
+        .map_err(|e| format!("Failed to refresh token: {}", e))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Token refresh failed ({}): {}", status, body));
+    }
+
+    let data: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse token response: {}", e))?;
+
+    let access_token = data["access_token"]
+        .as_str()
+        .ok_or_else(|| "No access_token in refresh response".to_string())?
+        .to_string();
+    let new_refresh_token = data["refresh_token"]
+        .as_str()
+        .ok_or_else(|| "No refresh_token in refresh response".to_string())?
+        .to_string();
+    let expires_in = data["expires_in"].as_i64().unwrap_or(3600);
+    let expires_at = chrono::Utc::now().timestamp_millis() + (expires_in * 1000);
+
+    Ok(crate::ai_providers::OAuthCredentials {
+        access_token,
+        refresh_token: new_refresh_token,
+        expires_at,
+    })
+}
+
+/// Ensure the Anthropic OAuth token is valid, refreshing if needed.
+/// This should be called before starting a mission that uses Claude Code.
+pub async fn ensure_anthropic_oauth_token_valid() -> Result<(), String> {
+    if !is_anthropic_oauth_token_expired() {
+        return Ok(());
+    }
+
+    tracing::info!("Anthropic OAuth token is expired or expiring soon, refreshing...");
+    refresh_anthropic_oauth_token().await
+}
+
+/// Force-refresh the Anthropic OAuth token regardless of local expiry.
+/// Used when the API rejects a token that hasn't locally expired yet
+/// (e.g., token was revoked server-side or rotated by another process).
+pub async fn force_refresh_anthropic_oauth_token() -> Result<(), String> {
+    tracing::info!("Force-refreshing Anthropic OAuth token (server-side revocation suspected)");
+    refresh_anthropic_oauth_token_inner(true).await
+}
+
+/// Refresh the OpenAI OAuth token using the refresh token.
+/// Updates auth.json with the new access token and expiry.
+/// Uses file-based locking to prevent concurrent refresh attempts.
+pub async fn refresh_openai_oauth_token() -> Result<(), String> {
+    // Acquire exclusive lock to prevent race conditions
+    let _lock = match acquire_oauth_refresh_lock(ProviderType::OpenAI) {
+        Ok(lock) => lock,
+        Err(e) => {
+            tracing::info!(
+                "Could not acquire refresh lock: {}. Waiting for other process to complete...",
+                e
+            );
+            // Another process is refreshing. Wait a bit and check if token is now fresh.
+            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+            // Re-check if token is still expired or missing
+            if let Some(entry) = read_oauth_token_entry(ProviderType::OpenAI) {
+                if !oauth_token_expired(entry.expires_at) {
+                    tracing::info!("Token was refreshed by another process");
+                    return Ok(());
+                }
+            } else {
+                // Token was deleted by another process after invalid_grant
+                return Err("No OpenAI OAuth entry after waiting for refresh".to_string());
+            }
+
+            // Try one more time to acquire the lock
+            acquire_oauth_refresh_lock(ProviderType::OpenAI)?
+        }
+    };
+
+    // Double-check token is still expired (another process might have refreshed it)
+    let entry = read_oauth_token_entry(ProviderType::OpenAI)
+        .ok_or_else(|| "No OpenAI OAuth entry found".to_string())?;
+
+    if !oauth_token_expired(entry.expires_at) {
+        tracing::info!("Token is no longer expired, skipping refresh");
+        return Ok(());
+    }
+
+    let refresh_token = entry.refresh_token.clone();
+
+    tracing::info!("Refreshing OpenAI OAuth token");
+
+    let client = reqwest::Client::new();
+    let token_body = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("grant_type", "refresh_token")
+        .append_pair("client_id", OPENAI_CLIENT_ID)
+        .append_pair("refresh_token", &refresh_token)
+        .finish();
+
+    let token_response = client
+        .post(OPENAI_TOKEN_URL)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(token_body)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to refresh token: {}", e))?;
+
+    if !token_response.status().is_success() {
+        let status = token_response.status();
+        let error_text = token_response.text().await.unwrap_or_default();
+        tracing::error!(
+            "OpenAI token refresh failed with status {}: {}",
+            status,
+            error_text
+        );
+        let lower = error_text.to_lowercase();
+        if (status == reqwest::StatusCode::BAD_REQUEST
+            || status == reqwest::StatusCode::UNAUTHORIZED)
+            && (lower.contains("invalid_grant") || lower.contains("refresh_token_reused"))
+        {
+            // Before deleting credentials, check if another process just refreshed the token
+            tracing::warn!("Received invalid_grant/refresh_token_reused error. Checking if token was recently refreshed...");
+
+            // Wait a moment and re-read credentials
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+            // Re-read token entry to see if it was updated
+            if let Some(updated_entry) = read_oauth_token_entry(ProviderType::OpenAI) {
+                // Check if the refresh token changed (indicating a recent refresh)
+                if updated_entry.refresh_token != refresh_token {
+                    tracing::info!("Token was refreshed by another process after invalid_grant");
+                    return Ok(());
+                }
+
+                // Check if access token is now valid
+                if !oauth_token_expired(updated_entry.expires_at) {
+                    tracing::info!("Token is now valid after invalid_grant");
+                    return Ok(());
+                }
+            }
+
+            // Token is genuinely invalid - delete it
+            tracing::error!("Refresh token is genuinely invalid. Removing credentials.");
+            if let Err(e) = remove_opencode_auth_entry(ProviderType::OpenAI) {
+                tracing::warn!(
+                    "Failed to clear OpenAI auth entry after refresh failure: {}",
+                    e
+                );
+            }
+        }
+        return Err(format!(
+            "Token refresh failed ({}): {}. You may need to re-authenticate.",
+            status, error_text
+        ));
+    }
+
+    let token_data: serde_json::Value = token_response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse token response: {}", e))?;
+
+    let new_access_token = token_data["access_token"]
+        .as_str()
+        .ok_or_else(|| "No access token in refresh response".to_string())?;
+
+    // **Solution #2: Capture new refresh token if provider rotates them**
+    let new_refresh_token = token_data["refresh_token"]
+        .as_str()
+        .unwrap_or(refresh_token.as_str());
+
+    let expires_in = token_data["expires_in"].as_i64().unwrap_or(3600);
+    let expires_at = chrono::Utc::now().timestamp_millis() + (expires_in * 1000);
+
+    // **Solution #3: Sync to all storage tiers atomically**
+    sync_oauth_to_all_tiers(
+        ProviderType::OpenAI,
+        new_refresh_token,
+        new_access_token,
+        expires_at,
+    )?;
+
+    tracing::info!(
+        "Successfully refreshed OpenAI OAuth token, expires in {} seconds",
+        expires_in
+    );
+
+    Ok(())
+}
+
+/// Ensure the OpenAI OAuth token is valid, refreshing if needed.
+pub async fn ensure_openai_oauth_token_valid() -> Result<(), String> {
+    if !is_oauth_token_expired(ProviderType::OpenAI) {
+        return Ok(());
+    }
+
+    tracing::info!("OpenAI OAuth token is expired or expiring soon, refreshing...");
+    refresh_openai_oauth_token().await
+}
+
+/// Refresh the Google OAuth token using the refresh token.
+/// Updates auth.json with the new access token and expiry.
+/// Uses file-based locking to prevent concurrent refresh attempts.
+pub async fn refresh_google_oauth_token() -> Result<(), String> {
+    // Acquire exclusive lock to prevent race conditions
+    let _lock = match acquire_oauth_refresh_lock(ProviderType::Google) {
+        Ok(lock) => lock,
+        Err(e) => {
+            tracing::info!(
+                "Could not acquire refresh lock: {}. Waiting for other process to complete...",
+                e
+            );
+            // Another process is refreshing. Wait a bit and check if token is now fresh.
+            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+            // Re-check if token is still expired or missing
+            if let Some(entry) = read_oauth_token_entry(ProviderType::Google) {
+                if !oauth_token_expired(entry.expires_at) {
+                    tracing::info!("Token was refreshed by another process");
+                    return Ok(());
+                }
+            } else {
+                // Token was deleted by another process after invalid_grant
+                return Err("No Google OAuth entry after waiting for refresh".to_string());
+            }
+
+            // Try one more time to acquire the lock
+            acquire_oauth_refresh_lock(ProviderType::Google)?
+        }
+    };
+
+    // Double-check token is still expired (another process might have refreshed it)
+    let entry = read_oauth_token_entry(ProviderType::Google)
+        .ok_or_else(|| "No Google OAuth entry found".to_string())?;
+
+    if !oauth_token_expired(entry.expires_at) {
+        tracing::info!("Token is no longer expired, skipping refresh");
+        return Ok(());
+    }
+
+    let refresh_token = entry.refresh_token.clone();
+
+    tracing::info!("Refreshing Google OAuth token");
+
+    let client = reqwest::Client::new();
+    let token_body = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("client_id", google_client_id())
+        .append_pair("client_secret", google_client_secret())
+        .append_pair("refresh_token", &refresh_token)
+        .append_pair("grant_type", "refresh_token")
+        .finish();
+
+    let token_response = client
+        .post(GOOGLE_TOKEN_URL)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(token_body)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to refresh token: {}", e))?;
+
+    if !token_response.status().is_success() {
+        let status = token_response.status();
+        let error_text = token_response.text().await.unwrap_or_default();
+        tracing::error!(
+            "Google token refresh failed with status {}: {}",
+            status,
+            error_text
+        );
+        let lower = error_text.to_lowercase();
+        if (status == reqwest::StatusCode::BAD_REQUEST
+            || status == reqwest::StatusCode::UNAUTHORIZED)
+            && lower.contains("invalid_grant")
+        {
+            // Before deleting credentials, check if another process just refreshed the token
+            tracing::warn!(
+                "Received invalid_grant error. Checking if token was recently refreshed..."
+            );
+
+            // Wait a moment and re-read credentials
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+            // Re-read token entry to see if it was updated
+            if let Some(updated_entry) = read_oauth_token_entry(ProviderType::Google) {
+                // Check if the refresh token changed (indicating a recent refresh)
+                if updated_entry.refresh_token != refresh_token {
+                    tracing::info!("Token was refreshed by another process after invalid_grant");
+                    return Ok(());
+                }
+
+                // Check if access token is now valid
+                if !oauth_token_expired(updated_entry.expires_at) {
+                    tracing::info!("Token is now valid after invalid_grant");
+                    return Ok(());
+                }
+            }
+
+            // Token is genuinely invalid - delete it
+            tracing::error!("Refresh token is genuinely invalid. Removing credentials.");
+            if let Err(e) = remove_opencode_auth_entry(ProviderType::Google) {
+                tracing::warn!(
+                    "Failed to clear Google auth entry after invalid_grant: {}",
+                    e
+                );
+            }
+        }
+        return Err(format!(
+            "Token refresh failed ({}): {}. You may need to re-authenticate.",
+            status, error_text
+        ));
+    }
+
+    let token_data: serde_json::Value = token_response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse token response: {}", e))?;
+
+    let new_access_token = token_data["access_token"]
+        .as_str()
+        .ok_or_else(|| "No access token in refresh response".to_string())?;
+
+    // **Solution #2: Capture new refresh token if provider rotates them**
+    let new_refresh_token = token_data["refresh_token"]
+        .as_str()
+        .unwrap_or(refresh_token.as_str());
+
+    let expires_in = token_data["expires_in"].as_i64().unwrap_or(3600);
+    let expires_at = chrono::Utc::now().timestamp_millis() + (expires_in * 1000);
+
+    // **Solution #3: Sync to all storage tiers atomically**
+    sync_oauth_to_all_tiers(
+        ProviderType::Google,
+        new_refresh_token,
+        new_access_token,
+        expires_at,
+    )?;
+
+    tracing::info!(
+        "Successfully refreshed Google OAuth token, expires in {} seconds",
+        expires_in
+    );
+
+    Ok(())
+}
+
+/// Ensure the Google OAuth token is valid, refreshing if needed.
+pub async fn ensure_google_oauth_token_valid() -> Result<(), String> {
+    if !is_oauth_token_expired(ProviderType::Google) {
+        return Ok(());
+    }
+
+    tracing::info!("Google OAuth token is expired or expiring soon, refreshing...");
+    refresh_google_oauth_token().await
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Claude Code Credentials File
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Write OAuth credentials to Claude Code's credentials file.
+///
+/// Claude Code stores auth in `~/.claude/.credentials.json` with format:
+/// ```json
+/// {
+///   "claudeAiOauth": {
+///     "accessToken": "sk-ant-oat01-...",
+///     "refreshToken": "sk-ant-ort01-...",
+///     "expiresAt": 1748658860401,
+///     "scopes": ["user:inference", "user:profile", "user:sessions:claude_code"]
+///   }
+/// }
+/// ```
+///
+/// This allows Claude Code to refresh tokens automatically during long-running missions.
+pub fn write_claudecode_credentials_to_path(
+    credentials_dir: &std::path::Path,
+) -> Result<(), String> {
+    let entry = read_oauth_token_entry(ProviderType::Anthropic)
+        .ok_or_else(|| "No Anthropic OAuth entry found".to_string())?;
+
+    let credentials_path = credentials_dir.join(".credentials.json");
+
+    // Ensure parent directory exists
+    std::fs::create_dir_all(credentials_dir)
+        .map_err(|e| format!("Failed to create Claude credentials directory: {}", e))?;
+
+    // Read-modify-write to preserve other entries in the credentials file
+    let mut credentials: serde_json::Value = if credentials_path.exists() {
+        let existing = std::fs::read_to_string(&credentials_path)
+            .map_err(|e| format!("Failed to read Claude credentials: {}", e))?;
+        serde_json::from_str(&existing).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+
+    credentials["claudeAiOauth"] = serde_json::json!({
+        "accessToken": entry.access_token,
+        "refreshToken": entry.refresh_token,
+        "expiresAt": entry.expires_at,
+        "scopes": ["user:inference", "user:profile", "user:sessions:claude_code"]
+    });
+
+    let contents = serde_json::to_string_pretty(&credentials)
+        .map_err(|e| format!("Failed to serialize Claude credentials: {}", e))?;
+
+    std::fs::write(&credentials_path, contents)
+        .map_err(|e| format!("Failed to write Claude credentials: {}", e))?;
+
+    tracing::info!(
+        path = %credentials_path.display(),
+        expires_at = entry.expires_at,
+        "Wrote Claude Code credentials file with refresh token"
+    );
+
+    Ok(())
+}
+
+/// Write Claude Code credentials to a workspace.
+///
+/// For container workspaces, writes to the container's root home directory.
+/// For host workspaces, writes to the host's home directory.
+pub fn write_claudecode_credentials_for_workspace(
+    workspace: &crate::workspace::Workspace,
+) -> Result<(), String> {
+    use crate::workspace::WorkspaceType;
+
+    // Avoid clobbering the host's global Claude CLI credentials (used by `claude /login`).
+    // For host workspaces, Claude Code missions should instead run with a per-mission HOME
+    // so credentials live inside the mission directory.
+    if workspace.workspace_type == WorkspaceType::Host {
+        tracing::info!(
+            workspace_path = %workspace.path.display(),
+            "Skipping Claude Code credentials sync for host workspace"
+        );
+        return Ok(());
+    }
+
+    let entry = read_oauth_token_entry(ProviderType::Anthropic)
+        .or_else(|| {
+            if workspace.workspace_type == WorkspaceType::Container {
+                if let Some(entry) = read_oauth_entry_from_workspace_auth(&workspace.path) {
+                    // Best-effort sync so future reads hit the canonical store.
+                    let _ = write_sandboxed_credential(
+                        ProviderType::Anthropic,
+                        &entry.refresh_token,
+                        &entry.access_token,
+                        entry.expires_at,
+                    );
+                    return Some(entry);
+                }
+            }
+            None
+        })
+        .ok_or_else(|| "No Anthropic OAuth entry found".to_string())?;
+
+    let claude_dir = match workspace.workspace_type {
+        WorkspaceType::Container => {
+            // Container workspaces: write to /root/.claude inside the container
+            workspace.path.join("root").join(".claude")
+        }
+        WorkspaceType::Host => unreachable!("host handled above"),
+    };
+
+    write_claudecode_credentials_from_entry(
+        &claude_dir,
+        &entry.access_token,
+        &entry.refresh_token,
+        entry.expires_at,
+    )?;
+
+    tracing::info!(
+        workspace_type = ?workspace.workspace_type,
+        claude_dir = %claude_dir.display(),
+        expires_at = entry.expires_at,
+        "Prepared Claude Code credentials for workspace"
+    );
+
+    Ok(())
+}
+
+/// Sync an API key to OpenCode's auth.json file.
+fn sync_api_key_to_opencode_auth(provider_type: ProviderType, api_key: &str) -> Result<(), String> {
+    let auth_path = get_opencode_auth_path();
+
+    // Ensure parent directory exists
+    if let Some(parent) = auth_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create OpenCode auth directory: {}", e))?;
+    }
+
+    let mut auth: serde_json::Map<String, serde_json::Value> = if auth_path.exists() {
+        let contents = std::fs::read_to_string(&auth_path)
+            .map_err(|e| format!("Failed to read OpenCode auth: {}", e))?;
+        serde_json::from_str(&contents).unwrap_or_default()
+    } else {
+        serde_json::Map::new()
+    };
+
+    let keys = opencode_auth_keys(provider_type);
+    if keys.is_empty() {
+        return Ok(());
+    }
+
+    let entry = serde_json::json!({
+        "type": "api_key",
+        "key": api_key
+    });
+
+    for key in &keys {
+        auth.insert((*key).to_string(), entry.clone());
+    }
+
+    let contents = serde_json::to_string_pretty(&auth)
+        .map_err(|e| format!("Failed to serialize OpenCode auth: {}", e))?;
+    std::fs::write(&auth_path, contents)
+        .map_err(|e| format!("Failed to write OpenCode auth: {}", e))?;
+
+    if matches!(
+        provider_type,
+        ProviderType::OpenAI | ProviderType::Anthropic | ProviderType::Google
+    ) {
+        let provider_entry = serde_json::json!({
+            "type": "api_key",
+            "key": api_key
+        });
+        if let Err(e) = write_opencode_provider_auth_file(provider_type, &provider_entry) {
+            tracing::error!("Failed to write OpenCode provider auth file: {}", e);
+        }
+    }
+
+    tracing::info!(
+        "Synced API key to OpenCode auth.json for provider keys: {:?}",
+        keys
+    );
+
+    Ok(())
+}
+
+/// Remove a provider entry from OpenCode's auth.json file.
+fn remove_opencode_auth_entry(provider_type: ProviderType) -> Result<(), String> {
+    let auth_path = get_opencode_auth_path();
+    if !auth_path.exists() {
+        // Still attempt to remove provider-specific auth file if present.
+        if matches!(
+            provider_type,
+            ProviderType::OpenAI | ProviderType::Anthropic | ProviderType::Google
+        ) {
+            let provider_path = get_opencode_provider_auth_path(provider_type);
+            if provider_path.exists() {
+                std::fs::remove_file(&provider_path)
+                    .map_err(|e| format!("Failed to remove OpenCode provider auth: {}", e))?;
+            }
+        }
+        // Also clean sandboxed.sh's credential store
+        let _ = remove_sandboxed_credential(provider_type);
+        return Ok(());
+    }
+
+    let mut auth: serde_json::Map<String, serde_json::Value> = {
+        let contents = std::fs::read_to_string(&auth_path)
+            .map_err(|e| format!("Failed to read OpenCode auth: {}", e))?;
+        serde_json::from_str(&contents).unwrap_or_default()
+    };
+
+    let keys = opencode_auth_keys(provider_type);
+    if keys.is_empty() {
+        return Ok(());
+    }
+
+    let mut changed = false;
+    for key in &keys {
+        if auth.remove(*key).is_some() {
+            changed = true;
+        }
+    }
+
+    if changed {
+        let contents = serde_json::to_string_pretty(&auth)
+            .map_err(|e| format!("Failed to serialize OpenCode auth: {}", e))?;
+        std::fs::write(&auth_path, contents)
+            .map_err(|e| format!("Failed to write OpenCode auth: {}", e))?;
+    }
+
+    if matches!(
+        provider_type,
+        ProviderType::OpenAI | ProviderType::Anthropic | ProviderType::Google
+    ) {
+        let provider_path = get_opencode_provider_auth_path(provider_type);
+        if provider_path.exists() {
+            std::fs::remove_file(&provider_path)
+                .map_err(|e| format!("Failed to remove OpenCode provider auth: {}", e))?;
+        }
+    }
+
+    // Also clean sandboxed.sh's credential store
+    if let Err(e) = remove_sandboxed_credential(provider_type) {
+        tracing::warn!("Failed to remove sandboxed.sh credential entry: {}", e);
+    }
+
+    Ok(())
+}
+
+/// Get the path to OpenCode's auth.json file.
+fn get_opencode_auth_path() -> PathBuf {
+    let mut candidates = Vec::new();
+    if let Ok(data_home) = std::env::var("XDG_DATA_HOME") {
+        candidates.push(PathBuf::from(data_home).join("opencode").join("auth.json"));
+    }
+    let home = home_dir();
+    candidates.push(
+        PathBuf::from(&home)
+            .join(".local")
+            .join("share")
+            .join("opencode")
+            .join("auth.json"),
+    );
+    candidates.push(
+        PathBuf::from("/var/lib/opencode")
+            .join(".local")
+            .join("share")
+            .join("opencode")
+            .join("auth.json"),
+    );
+
+    for candidate in &candidates {
+        if candidate.exists() {
+            return candidate.clone();
+        }
+    }
+    candidates
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| PathBuf::from("/var/lib/opencode/.local/share/opencode/auth.json"))
+}
+
+fn get_opencode_provider_auth_path(provider_type: ProviderType) -> PathBuf {
+    let home = home_dir();
+    let candidates = vec![
+        PathBuf::from(&home)
+            .join(".opencode")
+            .join("auth")
+            .join(format!("{}.json", provider_type.id())),
+        PathBuf::from("/var/lib/opencode")
+            .join(".opencode")
+            .join("auth")
+            .join(format!("{}.json", provider_type.id())),
+    ];
+
+    for candidate in &candidates {
+        if candidate.exists() {
+            return candidate.clone();
+        }
+    }
+
+    candidates.into_iter().next().unwrap_or_else(|| {
+        PathBuf::from(home)
+            .join(".opencode")
+            .join("auth")
+            .join(format!("{}.json", provider_type.id()))
+    })
+}
+
+fn read_opencode_provider_auth(provider_type: ProviderType) -> Result<Option<AuthKind>, String> {
+    let auth_path = get_opencode_provider_auth_path(provider_type);
+    if !auth_path.exists() {
+        return Ok(None);
+    }
+
+    let contents = std::fs::read_to_string(&auth_path)
+        .map_err(|e| format!("Failed to read OpenCode provider auth: {}", e))?;
+    let value: serde_json::Value = serde_json::from_str(&contents)
+        .map_err(|e| format!("Failed to parse OpenCode provider auth: {}", e))?;
+    Ok(auth_kind_from_value(&value))
+}
+
+fn write_opencode_provider_auth_file(
+    provider_type: ProviderType,
+    entry: &serde_json::Value,
+) -> Result<(), String> {
+    let auth_path = get_opencode_provider_auth_path(provider_type);
+    if let Some(parent) = auth_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create OpenCode provider auth directory: {}", e))?;
+    }
+
+    let contents = serde_json::to_string_pretty(entry)
+        .map_err(|e| format!("Failed to serialize OpenCode provider auth: {}", e))?;
+    std::fs::write(&auth_path, contents)
+        .map_err(|e| format!("Failed to write OpenCode provider auth: {}", e))?;
+
+    Ok(())
+}
+
+fn opencode_auth_keys(provider_type: ProviderType) -> Vec<&'static str> {
+    match provider_type {
+        ProviderType::Custom => Vec::new(),
+        ProviderType::OpenAI => vec!["openai", "codex"],
+        _ => vec![provider_type.id()],
+    }
+}
+
+fn get_opencode_config_path(working_dir: &Path) -> PathBuf {
+    if let Ok(path) = std::env::var("OPENCODE_CONFIG") {
+        return PathBuf::from(path);
+    }
+    working_dir.join("opencode.json")
+}
+
+fn strip_sandboxed_key(mut value: serde_json::Value) -> serde_json::Value {
+    if let Some(obj) = value.as_object_mut() {
+        obj.remove("sandboxed");
+    }
+    value
+}
+
+fn read_opencode_config(path: &Path) -> Result<serde_json::Value, String> {
+    if !path.exists() {
+        return Ok(serde_json::json!({
+            "$schema": "https://opencode.ai/config.json",
+            "provider": {}
+        }));
+    }
+
+    let contents = std::fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read OpenCode config: {}", e))?;
+
+    match serde_json::from_str::<serde_json::Value>(&contents) {
+        Ok(value) => Ok(strip_sandboxed_key(value)),
+        Err(_) => {
+            let stripped = strip_jsonc_comments(&contents);
+            serde_json::from_str(&stripped)
+                .map(strip_sandboxed_key)
+                .map_err(|e| format!("Failed to parse OpenCode config: {}", e))
+        }
+    }
+}
+
+fn write_opencode_config(path: &Path, config: &serde_json::Value) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create OpenCode config directory: {}", e))?;
+    }
+
+    let contents = serde_json::to_string_pretty(config)
+        .map_err(|e| format!("Failed to serialize OpenCode config: {}", e))?;
+    std::fs::write(path, contents)
+        .map_err(|e| format!("Failed to write OpenCode config: {}", e))?;
+    Ok(())
+}
+
+fn get_provider_config_entry(
+    config: &serde_json::Value,
+    provider: ProviderType,
+) -> Option<ProviderConfigEntry> {
+    let providers = config.get("provider")?.as_object()?;
+    let entry = providers.get(provider.id())?.as_object()?;
+    let name = entry
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let base_url = entry
+        .get("baseURL")
+        .or_else(|| entry.get("baseUrl"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let enabled = entry.get("enabled").and_then(|v| v.as_bool());
+    let google_project_id = if provider == ProviderType::Google {
+        entry
+            .get("options")
+            .and_then(|v| v.as_object())
+            .and_then(|opts| opts.get("projectId"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    } else {
+        None
+    };
+    // Note: use_for_backends is now stored separately in .sandboxed-sh/provider_backends.json
+    // and should be read using read_provider_backends_state() instead
+    Some(ProviderConfigEntry {
+        name,
+        base_url,
+        enabled,
+        google_project_id,
+    })
+}
+
+fn set_provider_config_entry(
+    config: &mut serde_json::Value,
+    provider: ProviderType,
+    name: Option<String>,
+    base_url: Option<Option<String>>,
+    enabled: Option<bool>,
+    use_for_backends: Option<Vec<String>>,
+    google_project_id: Option<Option<String>>,
+) {
+    if !config.is_object() {
+        *config = serde_json::json!({});
+    }
+    let root = config.as_object_mut().expect("config object");
+    let providers_value = root
+        .entry("provider")
+        .or_insert_with(|| serde_json::json!({}));
+    if !providers_value.is_object() {
+        *providers_value = serde_json::json!({});
+    }
+    let providers = providers_value.as_object_mut().expect("provider object");
+    let entry = providers
+        .entry(provider.id().to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if !entry.is_object() {
+        *entry = serde_json::json!({});
+    }
+    let entry_obj = entry.as_object_mut().expect("provider entry object");
+
+    if let Some(name) = name {
+        entry_obj.insert("name".to_string(), serde_json::Value::String(name));
+    }
+
+    if let Some(base_url) = base_url {
+        match base_url {
+            Some(url) => {
+                entry_obj.insert("baseURL".to_string(), serde_json::Value::String(url));
+            }
+            None => {
+                entry_obj.remove("baseURL");
+                entry_obj.remove("baseUrl");
+            }
+        }
+    }
+
+    // OpenCode's config schema doesn't accept "enabled" under provider entries.
+    // We treat providers as enabled when present and avoid writing this field.
+    let _ = enabled;
+    entry_obj.remove("enabled");
+
+    // OpenCode's config schema doesn't accept "useForBackends" under provider entries.
+    // This field is now stored separately in .sandboxed-sh/provider_backends.json.
+    // Remove any existing useForBackends for migration/cleanup.
+    let _ = use_for_backends;
+    entry_obj.remove("useForBackends");
+
+    if provider == ProviderType::Google {
+        if let Some(project_id) = google_project_id {
+            match project_id {
+                Some(value) => {
+                    let options = entry_obj
+                        .entry("options".to_string())
+                        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+                    if let Some(options_obj) = options.as_object_mut() {
+                        options_obj
+                            .insert("projectId".to_string(), serde_json::Value::String(value));
+                    }
+                }
+                None => {
+                    if let Some(options) = entry_obj.get_mut("options") {
+                        if let Some(options_obj) = options.as_object_mut() {
+                            options_obj.remove("projectId");
+                        }
+                        if options.as_object().map(|o| o.is_empty()).unwrap_or(false) {
+                            entry_obj.remove("options");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn remove_provider_config_entry(config: &mut serde_json::Value, provider: ProviderType) {
+    if let Some(root) = config.as_object_mut() {
+        if let Some(providers_value) = root.get_mut("provider") {
+            if let Some(providers) = providers_value.as_object_mut() {
+                providers.remove(provider.id());
+            }
+        }
+    }
+}
+
+fn get_default_provider(config: &serde_json::Value) -> Option<ProviderType> {
+    let model = config.get("model").and_then(|v| v.as_str())?;
+    let provider = model.split('/').next()?.trim();
+    ProviderType::from_id(provider)
+}
+
+fn default_provider_state_path(working_dir: &Path) -> PathBuf {
+    working_dir
+        .join(".sandboxed-sh")
+        .join("default_provider.json")
+}
+
+fn read_default_provider_state(working_dir: &Path) -> Option<ProviderType> {
+    let path = default_provider_state_path(working_dir);
+    let contents = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&contents).ok()?;
+    value
+        .get("default_provider")
+        .and_then(|v| v.as_str())
+        .and_then(ProviderType::from_id)
+}
+
+fn write_default_provider_state(working_dir: &Path, provider: ProviderType) -> Result<(), String> {
+    let path = default_provider_state_path(working_dir);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create default provider directory: {}", e))?;
+    }
+    let payload = serde_json::json!({
+        "default_provider": provider.id(),
+    });
+    let contents = serde_json::to_string_pretty(&payload)
+        .map_err(|e| format!("Failed to serialize default provider: {}", e))?;
+    std::fs::write(path, contents)
+        .map_err(|e| format!("Failed to write default provider: {}", e))?;
+    Ok(())
+}
+
+fn clear_default_provider_state(working_dir: &Path) -> Result<(), String> {
+    let path = default_provider_state_path(working_dir);
+    if path.exists() {
+        std::fs::remove_file(path)
+            .map_err(|e| format!("Failed to remove default provider file: {}", e))?;
+    }
+    Ok(())
+}
+
+/// Path to the provider backends state file.
+/// This stores which backends each provider is used for (e.g., opencode, claudecode).
+/// This is stored separately from the OpenCode config because OpenCode doesn't recognize this field.
+fn provider_backends_state_path(working_dir: &Path) -> PathBuf {
+    working_dir
+        .join(".sandboxed-sh")
+        .join("provider_backends.json")
+}
+
+/// Read provider backends state from the separate state file.
+/// Returns a map of provider_id -> backends (e.g., "anthropic" -> ["opencode", "claudecode"])
+fn read_provider_backends_state(working_dir: &Path) -> HashMap<String, Vec<String>> {
+    let path = provider_backends_state_path(working_dir);
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return HashMap::new(),
+    };
+    let value: serde_json::Value = match serde_json::from_str(&contents) {
+        Ok(v) => v,
+        Err(_) => return HashMap::new(),
+    };
+    let obj = match value.as_object() {
+        Some(o) => o,
+        None => return HashMap::new(),
+    };
+    obj.iter()
+        .filter_map(|(k, v)| {
+            v.as_array().map(|arr| {
+                let backends: Vec<String> = arr
+                    .iter()
+                    .filter_map(|b| b.as_str().map(|s| s.to_string()))
+                    .collect();
+                (k.clone(), backends)
+            })
+        })
+        .collect()
+}
+
+/// Write provider backends state to the separate state file.
+fn write_provider_backends_state(
+    working_dir: &Path,
+    backends: &HashMap<String, Vec<String>>,
+) -> Result<(), String> {
+    let path = provider_backends_state_path(working_dir);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create provider backends directory: {}", e))?;
+    }
+    let payload = serde_json::json!(backends);
+    let contents = serde_json::to_string_pretty(&payload)
+        .map_err(|e| format!("Failed to serialize provider backends: {}", e))?;
+    std::fs::write(path, contents)
+        .map_err(|e| format!("Failed to write provider backends: {}", e))?;
+    Ok(())
+}
+
+/// Update backends for a specific provider in the state file.
+fn update_provider_backends(
+    working_dir: &Path,
+    provider_id: &str,
+    backends: Vec<String>,
+) -> Result<(), String> {
+    let mut state = read_provider_backends_state(working_dir);
+    state.insert(provider_id.to_string(), backends);
+    write_provider_backends_state(working_dir, &state)
+}
+
+/// Remove a provider from the backends state file.
+fn remove_provider_backends(working_dir: &Path, provider_id: &str) -> Result<(), String> {
+    let mut state = read_provider_backends_state(working_dir);
+    state.remove(provider_id);
+    write_provider_backends_state(working_dir, &state)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Provider Account Info State (provider_accounts.json)
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn provider_accounts_state_path(working_dir: &Path) -> PathBuf {
+    working_dir
+        .join(".sandboxed-sh")
+        .join("provider_accounts.json")
+}
+
+/// Read provider account info state from the state file.
+/// Returns a map of provider_id -> account email (e.g., "anthropic" -> "user@example.com")
+pub fn read_provider_accounts_state(working_dir: &Path) -> HashMap<String, String> {
+    let path = provider_accounts_state_path(working_dir);
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return HashMap::new(),
+    };
+    serde_json::from_str(&contents).unwrap_or_default()
+}
+
+/// Write provider account info state to the state file.
+fn write_provider_accounts_state(
+    working_dir: &Path,
+    accounts: &HashMap<String, String>,
+) -> Result<(), String> {
+    let path = provider_accounts_state_path(working_dir);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create provider accounts directory: {}", e))?;
+    }
+    let contents = serde_json::to_string_pretty(accounts)
+        .map_err(|e| format!("Failed to serialize provider accounts: {}", e))?;
+    std::fs::write(path, contents)
+        .map_err(|e| format!("Failed to write provider accounts: {}", e))?;
+    Ok(())
+}
+
+/// Update account email for a specific provider in the state file.
+pub fn update_provider_account(
+    working_dir: &Path,
+    provider_id: &str,
+    email: String,
+) -> Result<(), String> {
+    let mut state = read_provider_accounts_state(working_dir);
+    state.insert(provider_id.to_string(), email);
+    write_provider_accounts_state(working_dir, &state)
+}
+
+/// Remove a provider from the accounts state file.
+fn remove_provider_account(working_dir: &Path, provider_id: &str) -> Result<(), String> {
+    let mut state = read_provider_accounts_state(working_dir);
+    state.remove(provider_id);
+    write_provider_accounts_state(working_dir, &state)
+}
+
+/// Extract email from a JWT id_token by decoding the payload (no signature verification).
+/// JWT format: header.payload.signature, where payload is base64url-encoded JSON.
+fn extract_email_from_jwt(token: &str) -> Option<String> {
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let bytes = URL_SAFE_NO_PAD.decode(parts[1]).ok()?;
+    let json: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    json.get("email")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+/// Fetch account email from Anthropic's userinfo endpoint using an access token.
+///
+/// Calls `GET /v1/oauth/userinfo` on the Anthropic console. This is needed because
+/// Anthropic's OAuth token response doesn't include an `id_token` or email claim.
+pub async fn fetch_anthropic_account_email(access_token: &str) -> Option<String> {
+    let client = reqwest::Client::new();
+
+    // Try GET first, then POST if Cloudflare blocks GET
+    for method in &["GET", "POST"] {
+        let req = if *method == "GET" {
+            client
+                .get("https://console.anthropic.com/v1/oauth/userinfo")
+                .header("Authorization", format!("Bearer {}", access_token))
+        } else {
+            client
+                .post("https://console.anthropic.com/v1/oauth/userinfo")
+                .header("Authorization", format!("Bearer {}", access_token))
+                .header("Content-Type", "application/json")
+                .body("{}")
+        };
+
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(
+                    method = method,
+                    error = %e,
+                    "Anthropic userinfo request failed (network error)"
+                );
+                continue;
+            }
+        };
+        let status = resp.status();
+        if !status.is_success() {
+            let body_preview = resp
+                .text()
+                .await
+                .unwrap_or_default()
+                .chars()
+                .take(200)
+                .collect::<String>();
+            tracing::warn!(
+                method = method,
+                status = %status,
+                body_preview = %body_preview,
+                "Anthropic userinfo endpoint returned non-success (Cloudflare block?)"
+            );
+            continue;
+        }
+        let data: serde_json::Value = match resp.json().await {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!(method = method, error = %e, "Failed to parse userinfo response");
+                continue;
+            }
+        };
+        let email = data
+            .get("email")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| {
+                data.get("name")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            });
+        if email.is_some() {
+            return email;
+        }
+    }
+    None
+}
+
+/// Fetch account email from Google's userinfo endpoint using an access token.
+///
+/// Calls `GET https://www.googleapis.com/oauth2/v2/userinfo` with the access token.
+/// This is used as a fallback when the Google OAuth id_token doesn't contain an email claim.
+pub async fn fetch_google_account_email(access_token: &str) -> Option<String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .get("https://www.googleapis.com/oauth2/v2/userinfo")
+        .header("Authorization", format!("Bearer {}", access_token))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        tracing::debug!(
+            status = %resp.status(),
+            "Google userinfo endpoint returned non-success"
+        );
+        return None;
+    }
+    let data: serde_json::Value = resp.json().await.ok()?;
+    // Only return the email field; do not fall back to "name" which is a
+    // display name, not an email address.
+    data.get("email")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+/// Extract account email from an OAuth token response and persist it.
+///
+/// Tries `id_token` JWT first, then `access_token` JWT, then a plain `email` field.
+/// If an email is found, saves it to the provider accounts state file.
+fn extract_and_save_account_email(
+    token_data: &serde_json::Value,
+    working_dir: &Path,
+    provider_id: &str,
+    provider_label: &str,
+) -> Option<String> {
+    let email = token_data
+        .get("id_token")
+        .and_then(|v| v.as_str())
+        .and_then(extract_email_from_jwt)
+        .or_else(|| {
+            token_data
+                .get("access_token")
+                .and_then(|v| v.as_str())
+                .and_then(extract_email_from_jwt)
+        })
+        .or_else(|| {
+            token_data
+                .get("email")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
+        .or_else(|| {
+            // Anthropic token responses include account.email_address
+            token_data
+                .get("account")
+                .and_then(|a| a.get("email_address"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        });
+    if let Some(ref e) = email {
+        if let Err(err) = update_provider_account(working_dir, provider_id, e.clone()) {
+            tracing::warn!("Failed to save {} account email: {}", provider_label, err);
+        }
+    }
+    email
+}
+
+/// Read OpenCode's current auth.json contents.
+fn read_opencode_auth() -> Result<serde_json::Value, String> {
+    let auth_path = get_opencode_auth_path();
+    if !auth_path.exists() {
+        return Ok(serde_json::json!({}));
+    }
+
+    let contents = std::fs::read_to_string(&auth_path)
+        .map_err(|e| format!("Failed to read OpenCode auth: {}", e))?;
+    serde_json::from_str(&contents).map_err(|e| format!("Failed to parse OpenCode auth: {}", e))
+}
+
+fn auth_kind_from_value(value: &serde_json::Value) -> Option<AuthKind> {
+    match value.get("type").and_then(|v| v.as_str()) {
+        Some("oauth") => Some(AuthKind::OAuth),
+        Some("api_key") | Some("api") => Some(AuthKind::ApiKey),
+        _ => {
+            if value.get("refresh").is_some() || value.get("access").is_some() {
+                Some(AuthKind::OAuth)
+            } else if value.get("key").is_some() || value.get("api_key").is_some() {
+                Some(AuthKind::ApiKey)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn read_opencode_auth_map() -> Result<HashMap<ProviderType, AuthKind>, String> {
+    let auth = read_opencode_auth()?;
+    let mut out = HashMap::new();
+    let Some(map) = auth.as_object() else {
+        return Ok(out);
+    };
+
+    for (key, value) in map {
+        let Some(provider_type) = ProviderType::from_id(key.as_str()) else {
+            continue;
+        };
+        let kind = auth_kind_from_value(value);
+        if let Some(kind) = kind {
+            out.insert(provider_type, kind);
+        }
+    }
+
+    if let std::collections::hash_map::Entry::Vacant(entry) = out.entry(ProviderType::OpenAI) {
+        if let Ok(Some(kind)) = read_opencode_provider_auth(ProviderType::OpenAI) {
+            entry.insert(kind);
+        }
+    }
+
+    Ok(out)
+}
+
+/// Write to OpenCode's auth.json file.
+fn write_opencode_auth(auth: &serde_json::Value) -> Result<(), String> {
+    let auth_path = get_opencode_auth_path();
+
+    // Ensure parent directory exists
+    if let Some(parent) = auth_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create OpenCode auth directory: {}", e))?;
+    }
+
+    let contents = serde_json::to_string_pretty(auth)
+        .map_err(|e| format!("Failed to serialize OpenCode auth: {}", e))?;
+    std::fs::write(&auth_path, contents)
+        .map_err(|e| format!("Failed to write OpenCode auth: {}", e))?;
+
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Handlers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// GET /api/ai/providers/opencode-auth - Get current OpenCode auth credentials.
+async fn get_opencode_auth() -> Result<Json<OpenCodeAuthResponse>, (StatusCode, String)> {
+    match read_opencode_auth() {
+        Ok(auth) => Ok(Json(OpenCodeAuthResponse {
+            success: true,
+            message: "OpenCode auth retrieved".to_string(),
+            auth: Some(auth),
+        })),
+        Err(e) => Err(internal_error(e)),
+    }
+}
+
+/// POST /api/ai/providers/opencode-auth - Set OpenCode auth credentials directly.
+async fn set_opencode_auth(
+    Json(req): Json<SetOpenCodeAuthRequest>,
+) -> Result<Json<OpenCodeAuthResponse>, (StatusCode, String)> {
+    let provider_type = ProviderType::from_id(&req.provider).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid provider: {}", req.provider),
+        )
+    })?;
+    if !provider_type.uses_oauth() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("Provider {} does not use OAuth", req.provider),
+        ));
+    }
+
+    // Read existing auth
+    let mut auth = read_opencode_auth().map_err(internal_error)?;
+
+    // Create the auth entry in OpenCode format
+    let entry = serde_json::json!({
+        "type": "oauth",
+        "refresh": req.refresh_token,
+        "access": req.access_token,
+        "expires": req.expires_at
+    });
+    let entry_clone = entry.clone();
+
+    let keys = opencode_auth_keys(provider_type);
+    if keys.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "Provider {} does not map to OpenCode auth keys",
+                req.provider
+            ),
+        ));
+    }
+
+    // Update the auth object
+    if let Some(obj) = auth.as_object_mut() {
+        for key in &keys {
+            obj.insert((*key).to_string(), entry.clone());
+        }
+    } else {
+        let mut map = serde_json::Map::new();
+        for key in &keys {
+            map.insert((*key).to_string(), entry.clone());
+        }
+        auth = serde_json::Value::Object(map);
+    }
+
+    // Write back to file
+    write_opencode_auth(&auth).map_err(internal_error)?;
+
+    if matches!(
+        provider_type,
+        ProviderType::OpenAI | ProviderType::Anthropic | ProviderType::Google
+    ) {
+        if let Err(e) = write_opencode_provider_auth_file(provider_type, &entry_clone) {
+            tracing::error!("Failed to write OpenCode provider auth file: {}", e);
+        }
+    }
+
+    tracing::info!(
+        "Set OpenCode auth credentials for provider: {}",
+        req.provider
+    );
+
+    Ok(Json(OpenCodeAuthResponse {
+        success: true,
+        message: format!(
+            "OpenCode auth credentials set for provider: {}",
+            req.provider
+        ),
+        auth: Some(auth),
+    }))
+}
+
+/// GET /api/ai/providers/types - List available provider types.
+async fn list_provider_types() -> Json<Vec<ProviderTypeInfo>> {
+    let types = vec![
+        ProviderTypeInfo {
+            id: "anthropic".to_string(),
+            name: "Anthropic".to_string(),
+            uses_oauth: true,
+            env_var: Some("ANTHROPIC_API_KEY".to_string()),
+        },
+        ProviderTypeInfo {
+            id: "openai".to_string(),
+            name: "OpenAI".to_string(),
+            uses_oauth: true,
+            env_var: Some("OPENAI_API_KEY".to_string()),
+        },
+        ProviderTypeInfo {
+            id: "google".to_string(),
+            name: "Google AI".to_string(),
+            uses_oauth: true,
+            env_var: Some("GOOGLE_API_KEY".to_string()),
+        },
+        ProviderTypeInfo {
+            id: "amazon-bedrock".to_string(),
+            name: "Amazon Bedrock".to_string(),
+            uses_oauth: false,
+            env_var: None,
+        },
+        ProviderTypeInfo {
+            id: "azure".to_string(),
+            name: "Azure OpenAI".to_string(),
+            uses_oauth: false,
+            env_var: Some("AZURE_OPENAI_API_KEY".to_string()),
+        },
+        ProviderTypeInfo {
+            id: "open-router".to_string(),
+            name: "OpenRouter".to_string(),
+            uses_oauth: false,
+            env_var: Some("OPENROUTER_API_KEY".to_string()),
+        },
+        ProviderTypeInfo {
+            id: "mistral".to_string(),
+            name: "Mistral AI".to_string(),
+            uses_oauth: false,
+            env_var: Some("MISTRAL_API_KEY".to_string()),
+        },
+        ProviderTypeInfo {
+            id: "groq".to_string(),
+            name: "Groq".to_string(),
+            uses_oauth: false,
+            env_var: Some("GROQ_API_KEY".to_string()),
+        },
+        ProviderTypeInfo {
+            id: "xai".to_string(),
+            name: "xAI".to_string(),
+            uses_oauth: true,
+            env_var: Some("XAI_API_KEY".to_string()),
+        },
+        ProviderTypeInfo {
+            id: "zai".to_string(),
+            name: "Z.AI".to_string(),
+            uses_oauth: false,
+            env_var: Some("ZHIPU_API_KEY".to_string()),
+        },
+        ProviderTypeInfo {
+            id: "minimax".to_string(),
+            name: "Minimax".to_string(),
+            uses_oauth: false,
+            env_var: Some("MINIMAX_API_KEY".to_string()),
+        },
+        ProviderTypeInfo {
+            id: "deep-infra".to_string(),
+            name: "DeepInfra".to_string(),
+            uses_oauth: false,
+            env_var: Some("DEEPINFRA_API_KEY".to_string()),
+        },
+        ProviderTypeInfo {
+            id: "cerebras".to_string(),
+            name: "Cerebras".to_string(),
+            uses_oauth: false,
+            env_var: Some("CEREBRAS_API_KEY".to_string()),
+        },
+        ProviderTypeInfo {
+            id: "together-ai".to_string(),
+            name: "Together AI".to_string(),
+            uses_oauth: false,
+            env_var: Some("TOGETHER_API_KEY".to_string()),
+        },
+        ProviderTypeInfo {
+            id: "perplexity".to_string(),
+            name: "Perplexity".to_string(),
+            uses_oauth: false,
+            env_var: Some("PERPLEXITY_API_KEY".to_string()),
+        },
+        ProviderTypeInfo {
+            id: "cohere".to_string(),
+            name: "Cohere".to_string(),
+            uses_oauth: false,
+            env_var: Some("COHERE_API_KEY".to_string()),
+        },
+        ProviderTypeInfo {
+            id: "github-copilot".to_string(),
+            name: "GitHub Copilot".to_string(),
+            uses_oauth: true,
+            env_var: None,
+        },
+    ];
+    Json(types)
+}
+
+/// GET /api/ai/providers - List all providers.
+async fn list_providers(
+    State(state): State<Arc<super::routes::AppState>>,
+) -> Result<Json<Vec<ProviderResponse>>, (StatusCode, String)> {
+    // Migrate any standard providers from opencode.json to the store on first call
+    migrate_opencode_providers_to_store(&state.ai_providers, &state.config.working_dir).await;
+
+    // All providers live in AIProviderStore now
+    let store_providers = state.ai_providers.list().await;
+    let mut providers: Vec<ProviderResponse> = store_providers
+        .iter()
+        .map(build_response_from_store)
+        .collect();
+
+    providers.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(Json(providers))
+}
+
+/// GET /api/ai/providers/for-backend/:backend_id - Get provider credentials for a specific backend.
+///
+/// For Claude Code backend, this returns the Anthropic provider that has "claudecode" in use_for_backends.
+async fn get_provider_for_backend(
+    State(state): State<Arc<super::routes::AppState>>,
+    AxumPath(backend_id): AxumPath<String>,
+) -> Result<Json<BackendProviderResponse>, (StatusCode, String)> {
+    // Currently only "claudecode" backend uses this endpoint
+    if backend_id != "claudecode" {
+        return Ok(Json(BackendProviderResponse {
+            configured: false,
+            provider_type: None,
+            provider_name: None,
+            api_key: None,
+            oauth: None,
+            has_credentials: false,
+            auth_method: None,
+        }));
+    }
+
+    // Read the provider backends state to find provider with claudecode in use_for_backends
+    let use_for_claudecode = provider_targets_backend(
+        &state.config.working_dir,
+        ProviderType::Anthropic,
+        "claudecode",
+    );
+
+    if !use_for_claudecode {
+        return Ok(Json(BackendProviderResponse {
+            configured: false,
+            provider_type: None,
+            provider_name: None,
+            api_key: None,
+            oauth: None,
+            has_credentials: false,
+            auth_method: None,
+        }));
+    }
+
+    // Check whether Anthropic credentials exist without returning secret material.
+    let auth = read_opencode_auth().map_err(internal_error)?;
+    let anthropic_auth = auth.get("anthropic");
+
+    let (auth_method, has_credentials) = backend_auth_status_from_entry(anthropic_auth);
+
+    // Get provider name from OpenCode config if available
+    let config_path = get_opencode_config_path(&state.config.working_dir);
+    let provider_name = read_opencode_config(&config_path)
+        .ok()
+        .and_then(|config| get_provider_config_entry(&config, ProviderType::Anthropic))
+        .and_then(|entry| entry.name)
+        .unwrap_or_else(|| "Anthropic".to_string());
+
+    Ok(Json(BackendProviderResponse {
+        configured: true,
+        provider_type: Some("anthropic".to_string()),
+        provider_name: Some(provider_name),
+        api_key: None,
+        oauth: None,
+        has_credentials,
+        auth_method,
+    }))
+}
+
+/// POST /api/ai/providers/:id/health - Check provider health and validate credentials.
+async fn check_provider_health(
+    State(state): State<Arc<super::routes::AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // Try to parse as UUID first (for custom providers), then as type ID
+    let (api_key_opt, provider_type) = if let Ok(uuid) = uuid::Uuid::parse_str(&id) {
+        // UUID lookup for custom providers
+        let provider = state.ai_providers.get(uuid).await.ok_or((
+            StatusCode::NOT_FOUND,
+            format!("Provider with ID {} not found", id),
+        ))?;
+
+        // Check if provider has credentials
+        let has_credentials = provider.api_key.is_some()
+            || provider.oauth.is_some()
+            || (provider.provider_type == ProviderType::Custom && provider.base_url.is_some());
+
+        if !has_credentials {
+            return Ok(Json(serde_json::json!({
+                "healthy": false,
+                "status": "no_credentials",
+                "message": "Provider has no API key, OAuth credentials, or base URL configured"
+            })));
+        }
+
+        (provider.api_key.clone(), provider.provider_type)
+    } else if let Some(provider_type) = ProviderType::from_id(&id) {
+        // Type ID lookup - check custom provider store first
+        if let Some(provider) = state.ai_providers.get_by_type(provider_type).await {
+            // Found in custom store
+            let has_credentials = provider.api_key.is_some()
+                || provider.oauth.is_some()
+                || (provider_type == ProviderType::Custom && provider.base_url.is_some());
+
+            if !has_credentials {
+                return Ok(Json(serde_json::json!({
+                    "healthy": false,
+                    "status": "no_credentials",
+                    "message": "Provider has no API key, OAuth credentials, or base URL configured"
+                })));
+            }
+
+            (provider.api_key.clone(), provider_type)
+        } else {
+            // Not in custom store - check OpenCode config for standard providers
+            if matches!(provider_type, ProviderType::Custom) {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    format!("Provider {} not configured", id),
+                ));
+            }
+
+            // Read OpenCode auth to get API key for standard providers
+            let auth_map = read_opencode_auth_map().map_err(internal_error)?;
+            let auth = read_opencode_auth().map_err(internal_error)?;
+
+            let auth_kind = auth_map.get(&provider_type);
+
+            // Check if provider has credentials in OpenCode config
+            match auth_kind {
+                Some(AuthKind::OAuth) => {
+                    // OAuth providers - just verify they're configured
+                    return Ok(Json(serde_json::json!({
+                        "healthy": true,
+                        "status": "configured",
+                        "message": "Provider has OAuth credentials configured (OAuth providers not tested)"
+                    })));
+                }
+                Some(AuthKind::ApiKey) => {
+                    // API key provider - read the actual key from auth.json
+                    // Use opencode_auth_keys() to check all possible key aliases
+                    // (e.g. OpenAI credentials may be under "openai" or "codex")
+                    let api_key_opt =
+                        opencode_auth_keys(provider_type)
+                            .into_iter()
+                            .find_map(|key| {
+                                auth.get(key)
+                                    .and_then(|v| {
+                                        v.get("key")
+                                            .or_else(|| v.get("api_key"))
+                                            .or_else(|| v.get("apiKey"))
+                                    })
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string())
+                            });
+
+                    if api_key_opt.is_none() {
+                        return Ok(Json(serde_json::json!({
+                            "healthy": false,
+                            "status": "no_credentials",
+                            "message": format!("Provider {} has no API key configured", id)
+                        })));
+                    }
+
+                    (api_key_opt, provider_type)
+                }
+                None => {
+                    return Ok(Json(serde_json::json!({
+                        "healthy": false,
+                        "status": "no_credentials",
+                        "message": format!("Provider {} is not configured", id)
+                    })));
+                }
+            }
+        }
+    } else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("Invalid provider ID: {}", id),
+        ));
+    };
+
+    // Perform a test API call based on provider type
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(internal_error)?;
+
+    let (api_url, test_body, auth_header) = match provider_type {
+        ProviderType::Cerebras => {
+            let key = api_key_opt
+                .as_ref()
+                .ok_or((StatusCode::BAD_REQUEST, "No API key".to_string()))?;
+            (
+                "https://api.cerebras.ai/v1/chat/completions",
+                serde_json::json!({
+                    "model": "llama-3.1-8b",
+                    "messages": [{"role": "user", "content": "test"}],
+                    "max_tokens": 1
+                }),
+                format!("Bearer {}", key),
+            )
+        }
+        ProviderType::Zai => {
+            let key = api_key_opt
+                .as_ref()
+                .ok_or((StatusCode::BAD_REQUEST, "No API key".to_string()))?;
+            (
+                "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+                serde_json::json!({
+                    "model": "glm-4.7-flash",
+                    "messages": [{"role": "user", "content": "test"}],
+                    "max_tokens": 1
+                }),
+                format!("Bearer {}", key),
+            )
+        }
+        ProviderType::Minimax => {
+            let key = api_key_opt
+                .as_ref()
+                .ok_or((StatusCode::BAD_REQUEST, "No API key".to_string()))?;
+            (
+                "https://api.minimax.io/v1/chat/completions",
+                serde_json::json!({
+                    "model": "MiniMax-M2",
+                    "messages": [{"role": "user", "content": "test"}],
+                    "max_tokens": 1
+                }),
+                format!("Bearer {}", key),
+            )
+        }
+        ProviderType::DeepInfra => {
+            let key = api_key_opt
+                .as_ref()
+                .ok_or((StatusCode::BAD_REQUEST, "No API key".to_string()))?;
+            (
+                "https://api.deepinfra.com/v1/openai/chat/completions",
+                serde_json::json!({
+                    "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+                    "messages": [{"role": "user", "content": "test"}],
+                    "max_tokens": 1
+                }),
+                format!("Bearer {}", key),
+            )
+        }
+        ProviderType::Anthropic | ProviderType::OpenAI | ProviderType::Google => {
+            // These providers use OAuth or have complex auth, skip API test
+            return Ok(Json(serde_json::json!({
+                "healthy": true,
+                "status": "configured",
+                "message": "Provider has credentials configured (OAuth providers not tested)"
+            })));
+        }
+        _ => {
+            // For other providers, just check if credentials exist
+            return Ok(Json(serde_json::json!({
+                "healthy": true,
+                "status": "configured",
+                "message": "Provider has credentials configured"
+            })));
+        }
+    };
+
+    // Make test request
+    match client
+        .post(api_url)
+        .header("Authorization", auth_header)
+        .header("Content-Type", "application/json")
+        .json(&test_body)
+        .send()
+        .await
+    {
+        Ok(response) => {
+            if response.status().is_success() || response.status().as_u16() == 402 {
+                // 402 = insufficient credits, but auth is valid
+                Ok(Json(serde_json::json!({
+                    "healthy": true,
+                    "status": "connected",
+                    "message": "Provider API key is valid and working"
+                })))
+            } else {
+                let status_code = response.status().as_u16();
+                let error_text = response
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "Unknown error".to_string());
+                Ok(Json(serde_json::json!({
+                    "healthy": false,
+                    "status": "api_error",
+                    "message": format!("API returned status {}: {}", status_code, error_text),
+                    "status_code": status_code
+                })))
+            }
+        }
+        Err(e) => Ok(Json(serde_json::json!({
+            "healthy": false,
+            "status": "connection_error",
+            "message": format!("Failed to connect to provider API: {}", e)
+        }))),
+    }
+}
+
+/// GET /api/ai/providers/:id/usage - Fetch live usage/rate-limit info from the provider API.
+///
+/// Makes a minimal API call to the provider and captures rate-limit headers
+/// from the response. Also returns any account info we have stored.
+async fn get_provider_usage(
+    State(state): State<Arc<super::routes::AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // Resolve provider credentials: check AIProviderStore first, then OpenCode auth.
+    // `provider_uuid` is `Some` when the credentials live in AIProviderStore and we
+    // can persist a refreshed OAuth back into that specific record.
+    let (provider_type, api_key_opt, oauth, account_email, provider_name, provider_uuid) =
+        if let Ok(uuid) = uuid::Uuid::parse_str(&id) {
+            // UUID lookup for custom providers
+            let provider = state
+                .ai_providers
+                .get(uuid)
+                .await
+                .ok_or((StatusCode::NOT_FOUND, format!("Provider {} not found", id)))?;
+            (
+                provider.provider_type,
+                provider.api_key.clone(),
+                provider.oauth.clone(),
+                provider.account_email.clone(),
+                provider.name.clone(),
+                Some(uuid),
+            )
+        } else if let Some(pt) = ProviderType::from_id(&id) {
+            // Try AIProviderStore first
+            if let Some(provider) = state.ai_providers.get_by_type(pt).await {
+                (
+                    provider.provider_type,
+                    provider.api_key.clone(),
+                    provider.oauth.clone(),
+                    provider.account_email.clone(),
+                    provider.name.clone(),
+                    Some(provider.id),
+                )
+            } else {
+                // Fall back to OpenCode auth: check both central auth.json
+                // and per-provider auth files (~/.opencode/auth/{provider}.json)
+                let auth = read_opencode_auth().map_err(internal_error)?;
+                let accounts_state = read_provider_accounts_state(&state.config.working_dir);
+                let account_email = accounts_state.get(pt.id()).cloned();
+
+                // Collect all auth entries: central + per-provider file
+                let mut auth_entries: Vec<&serde_json::Value> = opencode_auth_keys(pt)
+                    .into_iter()
+                    .filter_map(|key| auth.get(key))
+                    .collect();
+                // Also read per-provider auth file
+                let provider_auth_path = get_opencode_provider_auth_path(pt);
+                let provider_auth_value: Option<serde_json::Value> = if provider_auth_path.exists()
+                {
+                    std::fs::read_to_string(&provider_auth_path)
+                        .ok()
+                        .and_then(|c| serde_json::from_str(&c).ok())
+                } else {
+                    None
+                };
+                if let Some(ref pav) = provider_auth_value {
+                    auth_entries.push(pav);
+                }
+
+                let api_key = auth_entries.iter().find_map(|v| {
+                    v.get("key")
+                        .or_else(|| v.get("api_key"))
+                        .or_else(|| v.get("apiKey"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                });
+
+                let oauth_creds = auth_entries.iter().find_map(|entry| {
+                    let access = entry
+                        .get("access")
+                        .or_else(|| entry.get("access_token"))
+                        .and_then(|v| v.as_str())?;
+                    let refresh = entry
+                        .get("refresh")
+                        .or_else(|| entry.get("refresh_token"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let expires_at = entry
+                        .get("expires")
+                        .or_else(|| entry.get("expires_at"))
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    Some(crate::ai_providers::OAuthCredentials {
+                        access_token: access.to_string(),
+                        refresh_token: refresh,
+                        expires_at,
+                    })
+                });
+
+                if api_key.is_none() && oauth_creds.is_none() {
+                    return Ok(Json(serde_json::json!({
+                        "provider_type": pt.id(),
+                        "provider_name": pt.display_name(),
+                        "error": "No credentials found"
+                    })));
+                }
+
+                (
+                    pt,
+                    api_key,
+                    oauth_creds,
+                    account_email,
+                    pt.display_name().to_string(),
+                    None,
+                )
+            }
+        } else {
+            return Err((
+                StatusCode::NOT_FOUND,
+                format!("Invalid provider ID: {}", id),
+            ));
+        };
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(internal_error)?;
+
+    // Determine how to call each provider for rate-limit info
+    let usage_result = match provider_type {
+        ProviderType::Anthropic => {
+            // Use API key or OAuth access token. OAuth credentials must be
+            // sent as a Bearer token with the oauth-2025-04-20 beta header
+            // — sending them as `x-api-key` gets rejected with 401, which
+            // is what users on a Claude subscription (no api_key, OAuth only)
+            // were seeing while their missions still worked via Claude Code.
+            let (auth, is_oauth) = if let Some(ref key) = api_key_opt {
+                (key.clone(), false)
+            } else if let Some(ref o) = oauth {
+                // Refresh the token if expired before using it.
+                //
+                // When the provider lives in AIProviderStore (UUID-based
+                // lookup), refresh using that record's own refresh_token and
+                // persist the new credentials back into the same record —
+                // refresh_anthropic_oauth_token() only touches the shared
+                // opencode auth.json, so without this we'd silently reuse a
+                // months-stale access_token and surface as HTTP 401.
+                if oauth_token_expired(o.expires_at) {
+                    let (token, refresh_err) = if let Some(uuid) = provider_uuid {
+                        match exchange_anthropic_refresh_token(&o.refresh_token).await {
+                            Ok(fresh) => {
+                                let access = fresh.access_token.clone();
+                                if state
+                                    .ai_providers
+                                    .set_oauth_credentials(uuid, fresh)
+                                    .await
+                                    .is_none()
+                                {
+                                    tracing::warn!(
+                                        provider_id = %uuid,
+                                        "Provider disappeared while persisting refreshed OAuth credentials"
+                                    );
+                                }
+                                (access, None)
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    provider_id = %uuid,
+                                    "Per-provider Anthropic OAuth refresh failed: {}",
+                                    e
+                                );
+                                (o.access_token.clone(), Some(e))
+                            }
+                        }
+                    } else {
+                        if let Err(e) = refresh_anthropic_oauth_token().await {
+                            tracing::warn!(
+                                "Failed to refresh Anthropic OAuth token for usage check: {}",
+                                e
+                            );
+                        }
+                        let tok = read_oauth_token_entry(ProviderType::Anthropic)
+                            .map(|entry| entry.access_token)
+                            .unwrap_or_else(|| o.access_token.clone());
+                        (tok, None)
+                    };
+                    // If the refresh_token itself is dead, short-circuit with a
+                    // clear message — probing Anthropic with the stale
+                    // access_token would just return HTTP 401 and hide the real
+                    // problem (the user needs to re-authenticate).
+                    if let Some(err) = refresh_err {
+                        let lower = err.to_lowercase();
+                        if lower.contains("invalid_grant")
+                            || lower.contains("refresh token not found")
+                        {
+                            return Ok(Json(serde_json::json!({
+                                "provider_type": "anthropic",
+                                "provider_name": provider_name,
+                                "account_email": account_email,
+                                "status_code": 401,
+                                "error": "Refresh token revoked — please re-authenticate this account",
+                            })));
+                        }
+                    }
+                    (token, true)
+                } else {
+                    (o.access_token.clone(), true)
+                }
+            } else {
+                return Ok(Json(serde_json::json!({
+                    "provider_type": provider_type.id(),
+                    "provider_name": provider_name,
+                    "account_email": account_email,
+                    "error": "No credentials configured"
+                })));
+            };
+
+            // Minimal messages API call to get rate limit headers
+            let mut req_builder = client
+                .post("https://api.anthropic.com/v1/messages")
+                .header("anthropic-version", "2023-06-01")
+                .header("Content-Type", "application/json");
+            if is_oauth {
+                req_builder = req_builder
+                    .header("Authorization", format!("Bearer {}", auth))
+                    .header("anthropic-beta", "oauth-2025-04-20");
+            } else {
+                req_builder = req_builder.header("x-api-key", &auth);
+            }
+            // OAuth subscription tokens are only accepted when the request
+            // identifies itself as Claude Code via the system prompt; API-key
+            // requests don't need it, but including it is harmless.
+            let body = if is_oauth {
+                serde_json::json!({
+                    "model": "claude-haiku-4-5-20251001",
+                    "max_tokens": 1,
+                    "system": "You are Claude Code, Anthropic's official CLI for Claude.",
+                    "messages": [{"role": "user", "content": "hi"}]
+                })
+            } else {
+                serde_json::json!({
+                    "model": "claude-haiku-4-5-20251001",
+                    "max_tokens": 1,
+                    "messages": [{"role": "user", "content": "hi"}]
+                })
+            };
+            let resp = req_builder.json(&body).send().await;
+
+            match resp {
+                Ok(r) => {
+                    let status_code = r.status().as_u16();
+                    let headers = r.headers().clone();
+                    let mut info = serde_json::json!({
+                        "provider_type": "anthropic",
+                        "provider_name": provider_name,
+                        "account_email": account_email,
+                        "status_code": status_code,
+                    });
+                    if status_code == 401 || status_code == 403 {
+                        info["error"] = serde_json::json!(format!(
+                            "Authentication failed (HTTP {})",
+                            status_code
+                        ));
+                    }
+
+                    let map = info.as_object_mut().unwrap();
+
+                    // Extract organization ID
+                    if let Some(org) = headers
+                        .get("anthropic-organization-id")
+                        .and_then(|v| v.to_str().ok())
+                    {
+                        map.insert("organization_id".to_string(), serde_json::json!(org));
+
+                        // Persist the org onto the provider record so the
+                        // chain resolver can group credentials of the same
+                        // subscription under one shared cooldown — see
+                        // `store_account_subscription_key`.
+                        if let Some(uuid) = provider_uuid {
+                            if state
+                                .ai_providers
+                                .set_organization_id(uuid, org.to_string())
+                                .await
+                                .is_none()
+                            {
+                                tracing::warn!(
+                                    provider_id = %uuid,
+                                    "Provider disappeared while persisting organization_id"
+                                );
+                            }
+                        }
+                    }
+
+                    // Try new unified rate limit headers (Anthropic 2025+)
+                    let has_unified = headers.get("anthropic-ratelimit-unified-status").is_some();
+                    if has_unified {
+                        for (hdr, key) in [
+                            ("anthropic-ratelimit-unified-status", "unified_status"),
+                            ("anthropic-ratelimit-unified-reset", "unified_reset"),
+                            ("anthropic-ratelimit-unified-5h-status", "unified_5h_status"),
+                            ("anthropic-ratelimit-unified-5h-reset", "unified_5h_reset"),
+                            (
+                                "anthropic-ratelimit-unified-5h-utilization",
+                                "unified_5h_utilization",
+                            ),
+                            ("anthropic-ratelimit-unified-7d-status", "unified_7d_status"),
+                            ("anthropic-ratelimit-unified-7d-reset", "unified_7d_reset"),
+                            (
+                                "anthropic-ratelimit-unified-7d-utilization",
+                                "unified_7d_utilization",
+                            ),
+                            (
+                                "anthropic-ratelimit-unified-representative-claim",
+                                "unified_representative_claim",
+                            ),
+                            (
+                                "anthropic-ratelimit-unified-fallback-percentage",
+                                "unified_fallback_pct",
+                            ),
+                            (
+                                "anthropic-ratelimit-unified-overage-status",
+                                "unified_overage_status",
+                            ),
+                            (
+                                "anthropic-ratelimit-unified-overage-disabled-reason",
+                                "unified_overage_disabled_reason",
+                            ),
+                        ] {
+                            if let Some(v) = headers.get(hdr).and_then(|v| v.to_str().ok()) {
+                                if let Ok(n) = v.parse::<f64>() {
+                                    map.insert(key.to_string(), serde_json::json!(n));
+                                } else {
+                                    map.insert(key.to_string(), serde_json::json!(v));
+                                }
+                            }
+                        }
+                    } else {
+                        // Legacy per-resource rate limit headers
+                        for (hdr, key) in [
+                            ("anthropic-ratelimit-requests-limit", "requests_limit"),
+                            (
+                                "anthropic-ratelimit-requests-remaining",
+                                "requests_remaining",
+                            ),
+                            ("anthropic-ratelimit-requests-reset", "requests_reset"),
+                            ("anthropic-ratelimit-tokens-limit", "tokens_limit"),
+                            ("anthropic-ratelimit-tokens-remaining", "tokens_remaining"),
+                            ("anthropic-ratelimit-tokens-reset", "tokens_reset"),
+                            (
+                                "anthropic-ratelimit-input-tokens-limit",
+                                "input_tokens_limit",
+                            ),
+                            (
+                                "anthropic-ratelimit-input-tokens-remaining",
+                                "input_tokens_remaining",
+                            ),
+                            (
+                                "anthropic-ratelimit-output-tokens-limit",
+                                "output_tokens_limit",
+                            ),
+                            (
+                                "anthropic-ratelimit-output-tokens-remaining",
+                                "output_tokens_remaining",
+                            ),
+                        ] {
+                            if let Some(v) = headers.get(hdr).and_then(|v| v.to_str().ok()) {
+                                if let Ok(n) = v.parse::<u64>() {
+                                    map.insert(key.to_string(), serde_json::json!(n));
+                                } else {
+                                    map.insert(key.to_string(), serde_json::json!(v));
+                                }
+                            }
+                        }
+                    }
+                    info
+                }
+                Err(e) => serde_json::json!({
+                    "provider_type": "anthropic",
+                    "provider_name": provider_name,
+                    "account_email": account_email,
+                    "error": format!("Failed to reach API: {}", e)
+                }),
+            }
+        }
+        ProviderType::OpenAI => {
+            // The OpenAI /v1/chat/completions endpoint requires an sk-... API key.
+            // OAuth access tokens (JWT from ChatGPT Plus/Pro) don't work there.
+            // Try to find an API key: explicit key > minted key from OAuth flow.
+            let auth = if let Some(ref key) = api_key_opt {
+                key.clone()
+            } else if let Some(ref o) = oauth {
+                // OAuth user — check if an API key was minted during Codex setup
+                if let Some(key) = get_openai_api_key_for_codex_default(&state.config.working_dir) {
+                    key
+                } else {
+                    // No API key available. Validate OAuth token health before
+                    // returning status so expired sessions don't show as connected.
+                    let token_ok = !oauth_token_expired(o.expires_at);
+                    return Ok(Json(serde_json::json!({
+                        "provider_type": "openai",
+                        "provider_name": provider_name,
+                        "account_email": account_email,
+                        "status": if token_ok { "connected" } else { "needs_reauth" },
+                    })));
+                }
+            } else {
+                return Ok(Json(serde_json::json!({
+                    "provider_type": "openai",
+                    "provider_name": provider_name,
+                    "account_email": account_email,
+                    "error": "No credentials configured"
+                })));
+            };
+
+            let resp = client
+                .post("https://api.openai.com/v1/chat/completions")
+                .header("Authorization", format!("Bearer {}", auth))
+                .header("Content-Type", "application/json")
+                .json(&serde_json::json!({
+                    "model": "gpt-4.1-nano",
+                    "max_tokens": 1,
+                    "messages": [{"role": "user", "content": "hi"}]
+                }))
+                .send()
+                .await;
+
+            match resp {
+                Ok(r) => {
+                    let status_code = r.status().as_u16();
+                    let headers = r.headers().clone();
+                    let mut info = serde_json::json!({
+                        "provider_type": "openai",
+                        "provider_name": provider_name,
+                        "account_email": account_email,
+                        "status_code": status_code,
+                    });
+                    if status_code == 401 || status_code == 403 {
+                        info["error"] = serde_json::json!(format!(
+                            "Authentication failed (HTTP {})",
+                            status_code
+                        ));
+                    }
+
+                    let map = info.as_object_mut().unwrap();
+                    for (hdr, key) in [
+                        ("x-ratelimit-limit-requests", "requests_limit"),
+                        ("x-ratelimit-remaining-requests", "requests_remaining"),
+                        ("x-ratelimit-reset-requests", "requests_reset"),
+                        ("x-ratelimit-limit-tokens", "tokens_limit"),
+                        ("x-ratelimit-remaining-tokens", "tokens_remaining"),
+                        ("x-ratelimit-reset-tokens", "tokens_reset"),
+                    ] {
+                        if let Some(v) = headers.get(hdr).and_then(|v| v.to_str().ok()) {
+                            if let Ok(n) = v.parse::<u64>() {
+                                map.insert(key.to_string(), serde_json::json!(n));
+                            } else {
+                                map.insert(key.to_string(), serde_json::json!(v));
+                            }
+                        }
+                    }
+                    // Also extract organization header if present
+                    if let Some(org) = headers
+                        .get("openai-organization")
+                        .and_then(|v| v.to_str().ok())
+                    {
+                        map.insert("organization".to_string(), serde_json::json!(org));
+                    }
+                    info
+                }
+                Err(e) => serde_json::json!({
+                    "provider_type": "openai",
+                    "provider_name": provider_name,
+                    "account_email": account_email,
+                    "error": format!("Failed to reach API: {}", e)
+                }),
+            }
+        }
+        ProviderType::Cerebras => {
+            let key = match api_key_opt.as_ref() {
+                Some(k) => k,
+                None => {
+                    return Ok(Json(serde_json::json!({
+                        "provider_type": "cerebras",
+                        "provider_name": provider_name,
+                        "error": "No API key configured"
+                    })));
+                }
+            };
+
+            let resp = client
+                .post("https://api.cerebras.ai/v1/chat/completions")
+                .header("Authorization", format!("Bearer {}", key))
+                .header("Content-Type", "application/json")
+                .json(&serde_json::json!({
+                    "model": "llama-3.1-8b",
+                    "max_tokens": 1,
+                    "messages": [{"role": "user", "content": "hi"}]
+                }))
+                .send()
+                .await;
+
+            match resp {
+                Ok(r) => {
+                    let status_code = r.status().as_u16();
+                    let headers = r.headers().clone();
+                    let mut info = serde_json::json!({
+                        "provider_type": "cerebras",
+                        "provider_name": provider_name,
+                        "status_code": status_code,
+                    });
+                    if status_code == 401 || status_code == 403 || status_code == 429 {
+                        info["error"] =
+                            serde_json::json!(format!("API returned HTTP {}", status_code));
+                    }
+
+                    let map = info.as_object_mut().unwrap();
+                    for (hdr, key) in [
+                        ("x-ratelimit-limit-requests-day", "requests_limit_day"),
+                        (
+                            "x-ratelimit-remaining-requests-day",
+                            "requests_remaining_day",
+                        ),
+                        ("x-ratelimit-reset-requests-day", "requests_reset_day"),
+                        ("x-ratelimit-limit-tokens-minute", "tokens_limit_minute"),
+                        (
+                            "x-ratelimit-remaining-tokens-minute",
+                            "tokens_remaining_minute",
+                        ),
+                        ("x-ratelimit-reset-tokens-minute", "tokens_reset_minute"),
+                    ] {
+                        if let Some(v) = headers.get(hdr).and_then(|v| v.to_str().ok()) {
+                            if let Ok(n) = v.parse::<u64>() {
+                                map.insert(key.to_string(), serde_json::json!(n));
+                            } else {
+                                map.insert(key.to_string(), serde_json::json!(v));
+                            }
+                        }
+                    }
+                    info
+                }
+                Err(e) => serde_json::json!({
+                    "provider_type": "cerebras",
+                    "provider_name": provider_name,
+                    "error": format!("Failed to reach API: {}", e)
+                }),
+            }
+        }
+        ProviderType::Minimax => {
+            let key = match api_key_opt.as_ref() {
+                Some(k) => k,
+                None => {
+                    return Ok(Json(serde_json::json!({
+                        "provider_type": "minimax",
+                        "provider_name": provider_name,
+                        "error": "No API key configured"
+                    })));
+                }
+            };
+
+            // Minimax doesn't return rate-limit headers; try coding plan remains
+            let coding_resp = client
+                .get("https://api.minimax.io/v1/api/openplatform/coding_plan/remains")
+                .header("Authorization", format!("Bearer {}", key))
+                .send()
+                .await;
+
+            let mut info = serde_json::json!({
+                "provider_type": "minimax",
+                "provider_name": provider_name,
+            });
+
+            match coding_resp {
+                Ok(r) if r.status().is_success() => {
+                    if let Ok(data) = r.json::<serde_json::Value>().await {
+                        let map = info.as_object_mut().unwrap();
+                        map.insert("status".to_string(), serde_json::json!("connected"));
+                        // Extract model_remains into a structured array.
+                        // Only include coding models (MiniMax-M*) since all models
+                        // share the same quota pool and showing 20+ entries is noisy.
+                        if let Some(models) = data.get("model_remains").and_then(|v| v.as_array()) {
+                            let model_usage: Vec<serde_json::Value> = models
+                                .iter()
+                                .filter(|m| {
+                                    m.get("model_name")
+                                        .and_then(|v| v.as_str())
+                                        .map(|n| n.starts_with("MiniMax-M"))
+                                        .unwrap_or(false)
+                                })
+                                .map(|m| {
+                                    serde_json::json!({
+                                        "model": m.get("model_name").and_then(|v| v.as_str()).unwrap_or("unknown"),
+                                        "interval_total": m.get("current_interval_total_count").and_then(|v| v.as_u64()).unwrap_or(0),
+                                        "interval_remaining": m.get("current_interval_usage_count").and_then(|v| v.as_u64()).unwrap_or(0),
+                                        "weekly_total": m.get("current_weekly_total_count").and_then(|v| v.as_u64()).unwrap_or(0),
+                                        "weekly_remaining": m.get("current_weekly_usage_count").and_then(|v| v.as_u64()).unwrap_or(0),
+                                        "interval_reset": m.get("end_time").and_then(|v| v.as_i64()).unwrap_or(0),
+                                        "weekly_reset": m.get("weekly_end_time").and_then(|v| v.as_i64()).unwrap_or(0),
+                                    })
+                                })
+                                .collect();
+                            map.insert("model_usage".to_string(), serde_json::json!(model_usage));
+                        }
+                    }
+                }
+                Ok(_) => {
+                    // Coding plan endpoint failed; fall back to a test completion
+                    let test_resp = client
+                        .post("https://api.minimax.io/v1/chat/completions")
+                        .header("Authorization", format!("Bearer {}", key))
+                        .header("Content-Type", "application/json")
+                        .json(&serde_json::json!({
+                            "model": "MiniMax-M2",
+                            "max_tokens": 1,
+                            "messages": [{"role": "user", "content": "hi"}]
+                        }))
+                        .send()
+                        .await;
+
+                    match test_resp {
+                        Ok(r) if r.status().is_success() => {
+                            info.as_object_mut()
+                                .unwrap()
+                                .insert("status".to_string(), serde_json::json!("connected"));
+                        }
+                        Ok(r) => {
+                            let status = r.status().as_u16();
+                            let body = r.text().await.unwrap_or_default();
+                            info.as_object_mut().unwrap().insert(
+                                "error".to_string(),
+                                serde_json::json!(format!("API returned {}: {}", status, body)),
+                            );
+                        }
+                        Err(e) => {
+                            info.as_object_mut().unwrap().insert(
+                                "error".to_string(),
+                                serde_json::json!(format!("Failed to reach API: {}", e)),
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    info.as_object_mut().unwrap().insert(
+                        "error".to_string(),
+                        serde_json::json!(format!("Failed to reach API: {}", e)),
+                    );
+                }
+            }
+            info
+        }
+        ProviderType::Zai => {
+            let key = match api_key_opt.as_ref() {
+                Some(k) => k,
+                None => {
+                    return Ok(Json(serde_json::json!({
+                        "provider_type": "zai",
+                        "provider_name": provider_name,
+                        "error": "No API key configured"
+                    })));
+                }
+            };
+
+            // Z.AI doesn't expose rate-limit headers. Previously we sent a
+            // 1-token chat completion as a probe, but that burns quota every
+            // 60s and quickly hits 429 on free tiers. The `/models` endpoint
+            // is auth-checked without consuming inference budget, so use it
+            // instead — same connectedness signal, no rate-limit churn.
+            let resp = client
+                .get("https://open.bigmodel.cn/api/paas/v4/models")
+                .header("Authorization", format!("Bearer {}", key))
+                .send()
+                .await;
+
+            match resp {
+                Ok(r) => {
+                    let status_code = r.status().as_u16();
+                    let mut info = serde_json::json!({
+                        "provider_type": "zai",
+                        "provider_name": provider_name,
+                        "status": if status_code < 400 { "connected" } else { "error" },
+                    });
+                    if status_code >= 400 {
+                        info.as_object_mut().unwrap().insert(
+                            "error".to_string(),
+                            serde_json::json!(format!("API returned {}", status_code)),
+                        );
+                    }
+                    info
+                }
+                Err(e) => serde_json::json!({
+                    "provider_type": "zai",
+                    "provider_name": provider_name,
+                    "error": format!("Failed to reach API: {}", e)
+                }),
+            }
+        }
+        ProviderType::Google => {
+            // Google doesn't expose rate-limit headers via the standard Gemini API
+            // Check if we have OAuth credentials and try userinfo
+            let mut info = serde_json::json!({
+                "provider_type": "google",
+                "provider_name": provider_name,
+                "account_email": account_email,
+            });
+
+            if let Some(ref o) = oauth {
+                // Try to get additional account info from Google userinfo
+                match client
+                    .get("https://www.googleapis.com/oauth2/v2/userinfo")
+                    .header("Authorization", format!("Bearer {}", o.access_token))
+                    .send()
+                    .await
+                {
+                    Ok(r) if r.status().is_success() => {
+                        if let Ok(data) = r.json::<serde_json::Value>().await {
+                            let map = info.as_object_mut().unwrap();
+                            if let Some(name) = data.get("name").and_then(|v| v.as_str()) {
+                                map.insert("account_name".to_string(), serde_json::json!(name));
+                            }
+                            if let Some(email) = data.get("email").and_then(|v| v.as_str()) {
+                                map.insert("account_email".to_string(), serde_json::json!(email));
+                            }
+                            if let Some(pic) = data.get("picture").and_then(|v| v.as_str()) {
+                                map.insert("account_picture".to_string(), serde_json::json!(pic));
+                            }
+                            map.insert("status".to_string(), serde_json::json!("connected"));
+                        }
+                    }
+                    Ok(r) => {
+                        let status_code = r.status().as_u16();
+                        info["error"] = serde_json::json!(format!(
+                            "OAuth verification failed (HTTP {})",
+                            status_code
+                        ));
+                    }
+                    Err(e) => {
+                        info["error"] = serde_json::json!(format!("Failed to verify OAuth: {}", e));
+                    }
+                }
+            } else if api_key_opt.is_some() {
+                info.as_object_mut()
+                    .unwrap()
+                    .insert("status".to_string(), serde_json::json!("connected"));
+            } else {
+                info.as_object_mut().unwrap().insert(
+                    "error".to_string(),
+                    serde_json::json!("No credentials configured"),
+                );
+            }
+            info
+        }
+        ProviderType::Xai => {
+            let mut info = serde_json::json!({
+                "provider_type": "xai",
+                "provider_name": provider_name,
+                "account_email": account_email,
+            });
+
+            if api_key_opt.is_some() {
+                info.as_object_mut()
+                    .unwrap()
+                    .insert("status".to_string(), serde_json::json!("connected"));
+            } else if let Some(ref o) = oauth {
+                if oauth_token_expired(o.expires_at) {
+                    info.as_object_mut()
+                        .unwrap()
+                        .insert("status".to_string(), serde_json::json!("needs_reauth"));
+                    info.as_object_mut().unwrap().insert(
+                        "error".to_string(),
+                        serde_json::json!("xAI OAuth token expired; reconnect Grok Build"),
+                    );
+                } else {
+                    info.as_object_mut()
+                        .unwrap()
+                        .insert("status".to_string(), serde_json::json!("connected"));
+                }
+            } else {
+                info.as_object_mut().unwrap().insert(
+                    "error".to_string(),
+                    serde_json::json!("No credentials configured"),
+                );
+            }
+
+            info
+        }
+        _ => {
+            // Generic: just return what we know
+            serde_json::json!({
+                "provider_type": provider_type.id(),
+                "provider_name": provider_name,
+                "account_email": account_email,
+                "status": if api_key_opt.is_some() || oauth.is_some() { "connected" } else { "no_credentials" },
+            })
+        }
+    };
+
+    Ok(Json(usage_result))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cached usage handlers
+//
+// `get_provider_usage` above performs a live API call to the provider and is
+// the only place that knows how to do so. We expose it through a thin caching
+// layer so the dashboard sees fresh-but-instant data:
+//   * `get_provider_usage_cached` (GET /api/ai/providers/:id/usage) returns
+//     the cached value immediately when fresh, otherwise re-fetches live and
+//     repopulates the cache. Pass `?force=true` to bypass the freshness check.
+//   * `list_all_provider_usage` (GET /api/ai/providers/usage) returns the full
+//     cache snapshot and spawns background refresh tasks for any stale entries
+//     so subsequent reads land on fresh data.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct UsageQuery {
+    #[serde(default)]
+    pub force: bool,
+    /// If true, return the cached value (or 404 if none) without ever
+    /// triggering a live fetch.
+    #[serde(default)]
+    pub cached_only: bool,
+}
+
+/// Wrap the (axum) live fetch into a cache-write side-effect.
+async fn live_fetch_and_cache(
+    state: Arc<super::routes::AppState>,
+    id: String,
+) -> Result<serde_json::Value, (StatusCode, String)> {
+    let result = get_provider_usage(State(Arc::clone(&state)), AxumPath(id.clone())).await?;
+    let value = result.0;
+    state.provider_usage_cache.insert(id, value.clone()).await;
+    Ok(value)
+}
+
+/// GET /api/ai/providers/:id/usage — cache-aware variant of get_provider_usage.
+async fn get_provider_usage_cached(
+    State(state): State<Arc<super::routes::AppState>>,
+    AxumPath(id): AxumPath<String>,
+    axum::extract::Query(q): axum::extract::Query<UsageQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !q.force {
+        if let Some(cached) = state.provider_usage_cache.get(&id).await {
+            let is_fresh = cached.is_fresh();
+            let is_stale = cached.is_stale();
+            let fetched_at_iso = cached.fetched_at_iso.clone();
+            if is_fresh || !is_stale || q.cached_only {
+                let mut value = cached.value;
+                if let Some(obj) = value.as_object_mut() {
+                    obj.insert("cached".to_string(), serde_json::json!(true));
+                    obj.insert("fetched_at".to_string(), serde_json::json!(fetched_at_iso));
+                    if is_stale {
+                        obj.insert("stale".to_string(), serde_json::json!(true));
+                    }
+                }
+                // Kick off a background refresh if the value is older than
+                // REFRESH_AFTER but we returned the stale copy because the
+                // caller didn't ask for cached_only.
+                if !is_fresh && !q.cached_only {
+                    let bg_state = Arc::clone(&state);
+                    let bg_id = id.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = live_fetch_and_cache(bg_state, bg_id).await {
+                            tracing::debug!("background usage refresh failed: {:?}", e);
+                        }
+                    });
+                }
+                return Ok(Json(value));
+            }
+        }
+        if q.cached_only {
+            return Err((StatusCode::NOT_FOUND, "Usage not yet cached".to_string()));
+        }
+    }
+    let value = live_fetch_and_cache(state, id).await?;
+    Ok(Json(value))
+}
+
+/// GET /api/ai/providers/usage — bulk snapshot of every cached entry.
+async fn list_all_provider_usage(
+    State(state): State<Arc<super::routes::AppState>>,
+) -> Json<serde_json::Value> {
+    let snapshot = state.provider_usage_cache.snapshot().await;
+    let providers = state.ai_providers.list().await;
+
+    // Decide which provider ids to refresh in the background — every stored
+    // provider whose entry is missing or older than REFRESH_AFTER.
+    let candidate_ids: Vec<String> = providers.iter().map(|p| p.id.to_string()).collect();
+    let stale = state.provider_usage_cache.stale_keys(&candidate_ids).await;
+    for id in stale {
+        let bg_state = Arc::clone(&state);
+        tokio::spawn(async move {
+            if let Err(e) = live_fetch_and_cache(bg_state, id.clone()).await {
+                tracing::debug!(provider = %id, "background usage refresh failed: {:?}", e);
+            }
+        });
+    }
+
+    let mut entries = serde_json::Map::new();
+    for (key, cached) in snapshot {
+        let is_stale = cached.is_stale();
+        let fetched_at_iso = cached.fetched_at_iso.clone();
+        let mut value = cached.value;
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert("cached".to_string(), serde_json::json!(true));
+            obj.insert("fetched_at".to_string(), serde_json::json!(fetched_at_iso));
+            if is_stale {
+                obj.insert("stale".to_string(), serde_json::json!(true));
+            }
+        }
+        entries.insert(key, value);
+    }
+    Json(serde_json::json!({
+        "entries": entries,
+        "refresh_after_seconds": super::provider_usage_cache::REFRESH_AFTER.as_secs(),
+    }))
+}
+
+/// Start the recurring background refresh loop. Iterates every `REFRESH_AFTER`
+/// and re-fetches usage for every stored AI provider whose cache entry is
+/// stale (or never fetched).
+pub fn spawn_usage_refresh_loop(state: Arc<super::routes::AppState>) {
+    tokio::spawn(async move {
+        // Initial nudge: give the rest of the app a moment to settle before
+        // we hammer external providers.
+        tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+        loop {
+            let providers = state.ai_providers.list().await;
+            for p in providers {
+                let id = p.id.to_string();
+                let bg_state = Arc::clone(&state);
+                if let Err(e) = live_fetch_and_cache(bg_state, id.clone()).await {
+                    tracing::debug!(
+                        provider = %id,
+                        "scheduled usage refresh failed: {:?}",
+                        e
+                    );
+                }
+                // Spread the load — don't burst all providers in a single tick.
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+            tokio::time::sleep(super::provider_usage_cache::REFRESH_AFTER).await;
+        }
+    });
+}
+
+/// POST /api/ai/providers - Create a new provider.
+async fn create_provider(
+    State(state): State<Arc<super::routes::AppState>>,
+    Json(req): Json<CreateProviderRequest>,
+) -> Result<Json<ProviderResponse>, (StatusCode, String)> {
+    if req.name.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "Name cannot be empty".to_string()));
+    }
+
+    // Validate base URL if provided
+    if let Some(ref url) = req.base_url {
+        if url::Url::parse(url).is_err() {
+            return Err((StatusCode::BAD_REQUEST, "Invalid URL format".to_string()));
+        }
+    }
+
+    let provider_type = req.provider_type;
+
+    // All providers are now stored in AIProviderStore (ai_providers.json).
+    // Standard providers are additionally synced to opencode.json + auth.json
+    // for runtime consumption by OpenCode.
+    let use_for_backends = req
+        .use_for_backends
+        .clone()
+        .unwrap_or_else(|| default_backends_for_provider(provider_type));
+
+    let mut provider = crate::ai_providers::AIProvider::new(provider_type, req.name.clone());
+    provider.label = req.label.clone();
+    provider.priority = req.priority.unwrap_or(0);
+    provider.base_url = req.base_url.clone();
+    provider.api_key = req.api_key.clone();
+    provider.google_project_id = req.google_project_id.clone();
+    provider.custom_models = req.custom_models.clone();
+    provider.custom_env_var = req.custom_env_var.clone();
+    provider.npm_package = req.npm_package.clone();
+    provider.use_for_backends = Some(use_for_backends);
+    provider.enabled = req.enabled;
+
+    state.ai_providers.add(provider.clone()).await;
+
+    tracing::info!(
+        "Created AI provider: {} ({}, {})",
+        provider_type.display_name(),
+        req.name,
+        provider.id
+    );
+
+    // For standard providers, sync to opencode.json + auth.json for runtime compatibility
+    if provider_type != ProviderType::Custom {
+        sync_store_to_opencode(
+            &state.ai_providers,
+            &state.config.working_dir,
+            provider_type,
+        )
+        .await;
+    }
+
+    if provider_type == ProviderType::Xai && provider.enabled && provider_targets_grok(&provider) {
+        if let Err(e) = state.backend_configs.set_enabled("grok", true).await {
+            tracing::error!(
+                "Failed to enable Grok backend after xAI provider creation: {}",
+                e
+            );
+        }
+    }
+
+    // Refresh metadata LLM config so new API keys are picked up for title generation
+    super::metadata_llm::refresh_metadata_llm_config(&state.ai_providers).await;
+
+    let response = build_response_from_store(&provider);
+    Ok(Json(response))
+}
+
+/// GET /api/ai/providers/:id - Get provider details.
+async fn get_provider(
+    State(state): State<Arc<super::routes::AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<ProviderResponse>, (StatusCode, String)> {
+    // Try UUID first (all providers are now in the store)
+    if let Ok(uuid) = uuid::Uuid::parse_str(&id) {
+        if let Some(provider) = state.ai_providers.get(uuid).await {
+            return Ok(Json(build_response_from_store(&provider)));
+        }
+    }
+
+    // Fall back to provider type ID - find the first matching provider in the store
+    let provider_type = ProviderType::from_id(&id)
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", id)))?;
+    let provider = state
+        .ai_providers
+        .get_by_type(provider_type)
+        .await
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", id)))?;
+    Ok(Json(build_response_from_store(&provider)))
+}
+
+/// PUT /api/ai/providers/:id - Update a provider.
+///
+/// All providers are now in AIProviderStore. The `:id` can be a UUID or
+/// a provider type ID (for backwards compat, finds the first matching).
+async fn update_provider(
+    State(state): State<Arc<super::routes::AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Json(req): Json<UpdateProviderRequest>,
+) -> Result<Json<ProviderResponse>, (StatusCode, String)> {
+    if let Some(ref name) = req.name {
+        if name.is_empty() {
+            return Err((StatusCode::BAD_REQUEST, "Name cannot be empty".to_string()));
+        }
+    }
+
+    if let Some(Some(base_url)) = req.base_url.as_ref() {
+        if url::Url::parse(base_url).is_err() {
+            return Err((StatusCode::BAD_REQUEST, "Invalid URL format".to_string()));
+        }
+    }
+
+    // Find the provider in the store - try UUID first, then provider type ID
+    let existing = if let Ok(uuid) = uuid::Uuid::parse_str(&id) {
+        state.ai_providers.get(uuid).await
+    } else {
+        let provider_type = ProviderType::from_id(&id)
+            .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", id)))?;
+        state.ai_providers.get_by_type(provider_type).await
+    }
+    .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", id)))?;
+
+    let uuid = existing.id;
+    let mut updated = existing.clone();
+    if let Some(name) = req.name {
+        updated.name = name;
+    }
+    if let Some(label) = req.label {
+        updated.label = label;
+    }
+    if let Some(priority) = req.priority {
+        updated.priority = priority;
+    }
+    if let Some(google_project_id) = req.google_project_id {
+        updated.google_project_id = google_project_id;
+    }
+    if let Some(base_url) = req.base_url {
+        updated.base_url = base_url;
+    }
+    if let Some(enabled) = req.enabled {
+        updated.enabled = enabled;
+    }
+    if let Some(api_key_update) = req.api_key {
+        updated.api_key = api_key_update;
+    }
+    if let Some(ref backends) = req.use_for_backends {
+        updated.use_for_backends = Some(backends.clone());
+    }
+    if let Some(custom_models) = req.custom_models {
+        updated.custom_models = Some(custom_models);
+    }
+    if let Some(custom_env_var) = req.custom_env_var {
+        updated.custom_env_var = custom_env_var;
+    }
+    if let Some(npm_package) = req.npm_package {
+        updated.npm_package = npm_package;
+    }
+    if let Some(ref email) = req.account_email {
+        updated.account_email = Some(email.clone());
+        // Also persist to provider_accounts.json for list endpoint
+        if let Err(e) =
+            update_provider_account(&state.config.working_dir, &uuid.to_string(), email.clone())
+        {
+            tracing::warn!(
+                provider = %uuid,
+                error = %e,
+                "Failed to persist provider account email"
+            );
+        }
+    }
+
+    let result = state
+        .ai_providers
+        .update(uuid, updated)
+        .await
+        .ok_or_else(|| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to update provider".to_string(),
+            )
+        })?;
+
+    // Sync to opencode.json for standard providers
+    let pt = result.provider_type;
+    if pt != ProviderType::Custom {
+        sync_store_to_opencode(&state.ai_providers, &state.config.working_dir, pt).await;
+    }
+
+    if pt == ProviderType::Xai && result.enabled && provider_targets_grok(&result) {
+        if let Err(e) = state.backend_configs.set_enabled("grok", true).await {
+            tracing::error!(
+                "Failed to enable Grok backend after xAI provider update: {}",
+                e
+            );
+        }
+    }
+
+    let response = build_response_from_store(&result);
+
+    // Refresh metadata LLM config so updated API keys are picked up for title generation
+    super::metadata_llm::refresh_metadata_llm_config(&state.ai_providers).await;
+
+    tracing::info!(
+        "Updated {} provider: {} ({})",
+        pt.display_name(),
+        response.name,
+        uuid
+    );
+
+    Ok(Json(response))
+}
+
+/// DELETE /api/ai/providers/:id - Delete a provider.
+///
+/// The `:id` param can be either a provider type ID (e.g. "anthropic") for
+/// standard providers, or a UUID for store-based custom providers.
+async fn delete_provider(
+    State(state): State<Arc<super::routes::AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<(StatusCode, String), (StatusCode, String)> {
+    // Find the provider in the store - try UUID first, then provider type ID
+    let provider = if let Ok(uuid) = uuid::Uuid::parse_str(&id) {
+        state.ai_providers.get(uuid).await
+    } else {
+        let provider_type = ProviderType::from_id(&id)
+            .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", id)))?;
+        state.ai_providers.get_by_type(provider_type).await
+    }
+    .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", id)))?;
+
+    let provider_type = provider.provider_type;
+    let uuid = provider.id;
+
+    // Delete from AIProviderStore
+    if !state.ai_providers.delete(uuid).await {
+        return Err((StatusCode::NOT_FOUND, format!("Provider {} not found", id)));
+    }
+
+    // Re-sync opencode.json for this provider type (will remove if no more of this type)
+    if provider_type != ProviderType::Custom {
+        sync_store_to_opencode(
+            &state.ai_providers,
+            &state.config.working_dir,
+            provider_type,
+        )
+        .await;
+    }
+
+    // Clear default if this was the default
+    if read_default_provider_state(&state.config.working_dir) == Some(provider_type) {
+        // Check if there are still providers of this type
+        let remaining = state.ai_providers.get_all_by_type(provider_type).await;
+        if remaining.is_empty() {
+            if let Err(e) = clear_default_provider_state(&state.config.working_dir) {
+                tracing::error!("Failed to clear default provider state: {}", e);
+            }
+        }
+    }
+
+    // Refresh metadata LLM config in case the deleted provider was being used
+    super::metadata_llm::refresh_metadata_llm_config(&state.ai_providers).await;
+
+    Ok((
+        StatusCode::OK,
+        format!("Provider {} deleted successfully", id),
+    ))
+}
+
+/// POST /api/ai/providers/:id/auth - Initiate authentication for a provider.
+async fn authenticate_provider(
+    State(state): State<Arc<super::routes::AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<AuthResponse>, (StatusCode, String)> {
+    // Find the provider in the store
+    let provider = if let Ok(uuid) = uuid::Uuid::parse_str(&id) {
+        state.ai_providers.get(uuid).await
+    } else {
+        let provider_type = ProviderType::from_id(&id)
+            .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", id)))?;
+        state.ai_providers.get_by_type(provider_type).await
+    }
+    .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", id)))?;
+
+    let provider_type = provider.provider_type;
+    let has_credentials = provider.has_credentials();
+
+    if has_credentials {
+        return Ok(Json(AuthResponse {
+            success: true,
+            message: "Provider is authenticated".to_string(),
+            auth_url: None,
+        }));
+    }
+
+    // For OAuth providers, return an auth URL
+    if provider_type.uses_oauth() {
+        let auth_url = match provider_type {
+            ProviderType::Anthropic => {
+                Some("https://console.anthropic.com/settings/keys".to_string())
+            }
+            ProviderType::GithubCopilot => Some("https://github.com/login/device".to_string()),
+            _ => None,
+        };
+
+        return Ok(Json(AuthResponse {
+            success: false,
+            message: format!(
+                "Please authenticate with {} to connect this provider",
+                provider_type.display_name()
+            ),
+            auth_url,
+        }));
+    }
+
+    Ok(Json(AuthResponse {
+        success: false,
+        message: "API key is required for this provider".to_string(),
+        auth_url: None,
+    }))
+}
+
+/// POST /api/ai/providers/:id/default - Set as default provider.
+async fn set_default(
+    State(state): State<Arc<super::routes::AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<ProviderResponse>, (StatusCode, String)> {
+    // Find the provider in the store - try UUID first, then provider type ID
+    let provider = if let Ok(uuid) = uuid::Uuid::parse_str(&id) {
+        state.ai_providers.get(uuid).await
+    } else {
+        let provider_type = ProviderType::from_id(&id)
+            .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", id)))?;
+        state.ai_providers.get_by_type(provider_type).await
+    }
+    .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", id)))?;
+
+    let uuid = provider.id;
+    state.ai_providers.set_default(uuid).await;
+
+    // Also persist default in legacy state file for backwards compat
+    let _ = write_default_provider_state(&state.config.working_dir, provider.provider_type);
+
+    // Re-read from store to get updated is_default flag
+    let updated = state
+        .ai_providers
+        .get(uuid)
+        .await
+        .unwrap_or(provider.clone());
+    let response = build_response_from_store(&updated);
+    tracing::info!("Set default AI provider: {} ({})", response.name, id);
+    Ok(Json(response))
+}
+
+/// GET /api/ai/providers/:id/auth/methods - Get available auth methods for a provider.
+async fn get_auth_methods(
+    State(state): State<Arc<super::routes::AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Vec<AuthMethod>>, (StatusCode, String)> {
+    let provider_type = if let Ok(uuid) = uuid::Uuid::parse_str(&id) {
+        state
+            .ai_providers
+            .get(uuid)
+            .await
+            .map(|p| p.provider_type)
+            .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", id)))?
+    } else {
+        ProviderType::from_id(&id)
+            .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", id)))?
+    };
+    Ok(Json(provider_type.auth_methods()))
+}
+
+/// Generate PKCE code verifier and challenge.
+fn generate_pkce() -> (String, String) {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    let verifier: String = (0..43)
+        .map(|_| {
+            let idx = rng.gen_range(0..62);
+            let chars: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+            chars[idx] as char
+        })
+        .collect();
+
+    let mut hasher = Sha256::new();
+    hasher.update(verifier.as_bytes());
+    let hash = hasher.finalize();
+    let challenge = URL_SAFE_NO_PAD.encode(hash);
+
+    (verifier, challenge)
+}
+
+/// Generate a random OAuth state value.
+fn generate_state() -> String {
+    use rand::RngCore;
+    let mut rng = rand::thread_rng();
+    let mut bytes = [0u8; 16];
+    rng.fill_bytes(&mut bytes);
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Parse OpenAI OAuth input (URL, code#state, query string, or code).
+fn parse_openai_authorization_input(input: &str) -> (Option<String>, Option<String>) {
+    let value = input.trim();
+    if value.is_empty() {
+        return (None, None);
+    }
+
+    if let Ok(url) = url::Url::parse(value) {
+        let code = url.query_pairs().find(|(k, _)| k == "code").map(|(_, v)| v);
+        let state = url
+            .query_pairs()
+            .find(|(k, _)| k == "state")
+            .map(|(_, v)| v);
+        return (code.map(|v| v.to_string()), state.map(|v| v.to_string()));
+    }
+
+    if value.contains('#') {
+        let mut parts = value.splitn(2, '#');
+        let code = parts.next().map(|v| v.to_string());
+        let state = parts.next().map(|v| v.to_string());
+        return (code, state);
+    }
+
+    if value.contains("code=") {
+        let params = url::form_urlencoded::parse(value.as_bytes())
+            .into_owned()
+            .collect::<HashMap<String, String>>();
+        return (params.get("code").cloned(), params.get("state").cloned());
+    }
+
+    (Some(value.to_string()), None)
+}
+
+/// POST /api/ai/providers/:id/oauth/authorize - Initiate OAuth authorization.
+async fn oauth_authorize(
+    State(state): State<Arc<super::routes::AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Json(req): Json<OAuthAuthorizeRequest>,
+) -> Result<Json<OAuthAuthorizeResponse>, (StatusCode, String)> {
+    // Resolve provider type from UUID or type ID
+    let provider_type = if let Ok(uuid) = uuid::Uuid::parse_str(&id) {
+        state
+            .ai_providers
+            .get(uuid)
+            .await
+            .map(|p| p.provider_type)
+            .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", id)))?
+    } else {
+        ProviderType::from_id(&id)
+            .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", id)))?
+    };
+
+    let auth_methods = provider_type.auth_methods();
+    let method = auth_methods
+        .get(req.method_index)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Invalid method index".to_string()))?;
+
+    match provider_type {
+        ProviderType::Anthropic => {
+            // Generate PKCE
+            let (verifier, challenge) = generate_pkce();
+
+            // Determine mode based on method label
+            let mode = if method.label.contains("Pro") || method.label.contains("Max") {
+                "max"
+            } else {
+                "console"
+            };
+
+            // Build OAuth URL
+            let base_url = if mode == "max" {
+                "https://claude.ai/oauth/authorize"
+            } else {
+                "https://console.anthropic.com/oauth/authorize"
+            };
+
+            let mut url = url::Url::parse(base_url).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to parse URL: {}", e),
+                )
+            })?;
+            let client_id = anthropic_client_id();
+            let redirect_uri = anthropic_redirect_uri(mode, &client_id);
+
+            // Claude Max/Pro requires additional scope for sessions
+            let scope = if mode == "max" {
+                "org:create_api_key user:profile user:inference user:sessions:claude_code"
+            } else {
+                "org:create_api_key user:profile user:inference"
+            };
+
+            url.query_pairs_mut()
+                .append_pair("code", "true")
+                .append_pair("client_id", client_id.as_str())
+                .append_pair("response_type", "code")
+                .append_pair("redirect_uri", redirect_uri.as_str())
+                .append_pair("scope", scope)
+                .append_pair("code_challenge", challenge.as_str())
+                .append_pair("code_challenge_method", "S256")
+                .append_pair("state", verifier.as_str());
+
+            // Store pending OAuth
+            {
+                let mut pending = state.pending_oauth.write().await;
+                pending.insert(
+                    provider_type,
+                    PendingOAuth {
+                        verifier,
+                        mode: mode.to_string(),
+                        state: None,
+                        created_at: std::time::Instant::now(),
+                    },
+                );
+            }
+
+            let instructions = if mode == "max" {
+                "1. Click 'Authorize' on the Claude page\n2. After authorization, your browser will redirect to a page that won't load (localhost)\n3. Copy the FULL URL from your browser's address bar\n4. Paste the URL here and click Connect"
+            } else {
+                "1. Click 'Authorize' on the Claude page\n2. Copy the authorization code shown\n3. Paste the code here and click Connect"
+            };
+
+            Ok(Json(OAuthAuthorizeResponse {
+                url: url.to_string(),
+                instructions: instructions.to_string(),
+                method: "code".to_string(),
+            }))
+        }
+        ProviderType::OpenAI => {
+            let (verifier, challenge) = generate_pkce();
+            let state_value = generate_state();
+
+            let url = openai_authorize_url(&challenge, &state_value).map_err(internal_error)?;
+
+            let instructions = if method.label.contains("Manual") {
+                "After logging in, copy the full redirect URL and paste it here".to_string()
+            } else {
+                "A browser window should open. If it doesn't, copy the URL and open it manually."
+                    .to_string()
+            };
+
+            {
+                let mut pending = state.pending_oauth.write().await;
+                pending.insert(
+                    provider_type,
+                    PendingOAuth {
+                        verifier,
+                        mode: "openai".to_string(),
+                        state: Some(state_value),
+                        created_at: std::time::Instant::now(),
+                    },
+                );
+            }
+
+            Ok(Json(OAuthAuthorizeResponse {
+                url,
+                instructions,
+                method: "code".to_string(),
+            }))
+        }
+        ProviderType::Google => {
+            let (verifier, challenge) = generate_pkce();
+            let state_value = generate_state();
+
+            let url = google_authorize_url(&challenge, &state_value).map_err(internal_error)?;
+
+            {
+                let mut pending = state.pending_oauth.write().await;
+                pending.insert(
+                    provider_type,
+                    PendingOAuth {
+                        verifier,
+                        mode: "google".to_string(),
+                        state: Some(state_value),
+                        created_at: std::time::Instant::now(),
+                    },
+                );
+            }
+
+            Ok(Json(OAuthAuthorizeResponse {
+                url,
+                instructions:
+                    "Complete OAuth in your browser, then paste the full redirected URL (e.g., http://localhost:8085/oauth2callback?code=...&state=...) or just the authorization code."
+                        .to_string(),
+                method: "code".to_string(),
+            }))
+        }
+        ProviderType::Xai => {
+            let (url, code) = start_grok_device_auth().await.map_err(internal_error)?;
+            Ok(Json(OAuthAuthorizeResponse {
+                url,
+                instructions: format!(
+                    "1. Open the xAI authorization page.\n2. Confirm code: {code}\n3. After the page says connection successful, return here and click Connect."
+                ),
+                method: "auto".to_string(),
+            }))
+        }
+        _ => Err((
+            StatusCode::BAD_REQUEST,
+            "OAuth not supported for this provider".to_string(),
+        )),
+    }
+}
+
+/// POST /api/ai/providers/:id/oauth/callback - Exchange OAuth code for credentials.
+async fn oauth_callback(
+    State(state): State<Arc<super::routes::AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Json(req): Json<OAuthCallbackRequest>,
+) -> axum::response::Response {
+    let use_for_backends = req.use_for_backends.clone();
+    let provider_type_id = id.clone();
+    match oauth_callback_inner(State(state.clone()), AxumPath(id), Json(req)).await {
+        Ok(json) => {
+            // Resolve the provider type. The add-provider flow passes a
+            // provider-type id ("anthropic", ...); the reconnect button passes
+            // the stored provider's *UUID*, which `ProviderType::from_id` does
+            // not recognize. Look the UUID up in the store so reconnect still
+            // mirrors the fresh OAuth into the row instead of leaving it with
+            // expired tokens.
+            let resolved_type_and_uuid = match ProviderType::from_id(&provider_type_id) {
+                Some(pt) => Some((pt, None)),
+                None => match uuid::Uuid::parse_str(&provider_type_id) {
+                    Ok(uuid) => state
+                        .ai_providers
+                        .get(uuid)
+                        .await
+                        .map(|existing| (existing.provider_type, Some(uuid))),
+                    Err(_) => None,
+                },
+            };
+
+            if resolved_type_and_uuid.map(|(pt, _)| pt) == Some(ProviderType::Xai) {
+                // xAI tracks creds in auth.json only; don't mirror to the store.
+                return json.into_response();
+            }
+
+            // After successful OAuth, upsert the provider in AIProviderStore.
+            // The OAuth callback already synced creds to auth.json; now mirror that
+            // into the store so multiple accounts of the same type are tracked.
+            if let Some((provider_type, existing_uuid)) = resolved_type_and_uuid {
+                let backends = use_for_backends
+                    .unwrap_or_else(|| default_backends_for_provider(provider_type));
+
+                // Read the credentials that oauth_callback_inner just wrote to auth.json
+                let auth = read_opencode_auth().unwrap_or_default();
+                let auth_entry = auth.get(provider_type.id());
+
+                let accounts_state = read_provider_accounts_state(&state.config.working_dir);
+                let account_email = accounts_state
+                    .get(provider_type.id())
+                    .cloned()
+                    .or_else(|| json.0.account_email.clone());
+
+                let name = if let Some(ref email) = account_email {
+                    format!("{} ({})", provider_type.display_name(), email)
+                } else {
+                    provider_type.display_name().to_string()
+                };
+
+                let mut provider = crate::ai_providers::AIProvider::new(provider_type, name);
+                provider.use_for_backends = Some(backends);
+                provider.account_email = account_email;
+
+                // Extract credentials from auth.json
+                if let Some(entry) = auth_entry {
+                    let auth_type = entry.get("type").and_then(|v| v.as_str());
+                    match auth_type {
+                        Some("api_key") | Some("api") => {
+                            provider.api_key = entry
+                                .get("key")
+                                .or_else(|| entry.get("api_key"))
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                        }
+                        Some("oauth") => {
+                            let refresh = entry
+                                .get("refresh")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string();
+                            let access = entry
+                                .get("access")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string();
+                            let expires =
+                                entry.get("expires").and_then(|v| v.as_i64()).unwrap_or(0);
+                            provider.oauth = Some(crate::ai_providers::OAuthCredentials {
+                                refresh_token: refresh,
+                                access_token: access,
+                                expires_at: expires,
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+
+                // If the caller referenced an existing provider by UUID (the
+                // reconnect button passes the stored provider's id), refresh
+                // that row in place. We must NEVER fall through to `add` here:
+                // inserting a second account for the same OAuth completion would
+                // leave the targeted row stale and duplicate the credential. Any
+                // failure path returns an explicit error instead.
+                if let Some(uuid) = existing_uuid {
+                    let Some(mut existing) = state.ai_providers.get(uuid).await else {
+                        // The OAuth creds are already synced to auth.json; the
+                        // targeted row just vanished. Report rather than insert
+                        // a duplicate.
+                        return (
+                            axum::http::StatusCode::NOT_FOUND,
+                            "Provider to reconnect no longer exists".to_string(),
+                        )
+                            .into_response();
+                    };
+                    // Only replace the stored credentials when the callback
+                    // actually produced fresh ones. If `read_opencode_auth`
+                    // returned nothing (e.g. a failed auth.json sync that still
+                    // reported success), keep the existing creds rather than
+                    // wiping a row the user just re-authorized.
+                    if provider.api_key.is_some() || provider.oauth.is_some() {
+                        existing.api_key = provider.api_key.clone();
+                        existing.oauth = provider.oauth.clone();
+                    }
+                    existing.use_for_backends = provider.use_for_backends.clone();
+                    existing.enabled = true;
+                    // Only overwrite the display name/email when the new
+                    // credentials carry an identity; otherwise keep what the
+                    // user already had.
+                    if provider.account_email.is_some() {
+                        existing.account_email = provider.account_email.clone();
+                        existing.name = provider.name.clone();
+                    }
+                    return match state.ai_providers.update(uuid, existing).await {
+                        Some(stored) => Json(build_response_from_store(&stored)).into_response(),
+                        None => (
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            "Failed to persist reconnected provider".to_string(),
+                        )
+                            .into_response(),
+                    };
+                }
+
+                let store_id = state.ai_providers.add(provider.clone()).await;
+                // Return a response with the store UUID so the frontend can reference it
+                let stored = state.ai_providers.get(store_id).await.unwrap_or(provider);
+                return Json(build_response_from_store(&stored)).into_response();
+            }
+            json.into_response()
+        }
+        Err((status, message)) => (status, message).into_response(),
+    }
+}
+
+async fn oauth_callback_inner(
+    State(state): State<Arc<super::routes::AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Json(req): Json<OAuthCallbackRequest>,
+) -> Result<Json<ProviderResponse>, (axum::http::StatusCode, String)> {
+    // Resolve provider type from UUID or type ID
+    let provider_type = if let Ok(uuid) = uuid::Uuid::parse_str(&id) {
+        state
+            .ai_providers
+            .get(uuid)
+            .await
+            .map(|p| p.provider_type)
+            .ok_or_else(|| {
+                (
+                    axum::http::StatusCode::NOT_FOUND,
+                    format!("Provider {} not found", id),
+                )
+            })?
+    } else {
+        ProviderType::from_id(&id).ok_or_else(|| {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                format!("Provider {} not found", id),
+            )
+        })?
+    };
+
+    if provider_type == ProviderType::Xai {
+        let entry = wait_for_grok_auth_entry().await.ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                "Grok is not connected yet. Complete the xAI browser authorization first, then click Connect."
+                    .to_string(),
+            )
+        })?;
+        // Reconnect passes the row's UUID as the path id; thread it through so
+        // we update that exact row instead of the first OAuth xAI account.
+        let target_id = uuid::Uuid::parse_str(&id).ok();
+        let response =
+            upsert_grok_oauth_provider(&state, &entry, req.use_for_backends.clone(), target_id)
+                .await?;
+        return Ok(Json(response));
+    }
+
+    // Get pending OAuth state
+    let pending = {
+        let mut pending_oauth = state.pending_oauth.write().await;
+        pending_oauth.remove(&provider_type)
+    }
+    .ok_or_else(|| {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            "No pending OAuth authorization. Please start the OAuth flow again.".to_string(),
+        )
+    })?;
+
+    // Check if OAuth hasn't expired (10 minutes)
+    if pending.created_at.elapsed() > std::time::Duration::from_secs(600) {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "OAuth authorization expired. Please start again.".to_string(),
+        ));
+    }
+
+    match provider_type {
+        ProviderType::Anthropic => {
+            let client_id = anthropic_client_id();
+            let redirect_uri = anthropic_redirect_uri(&pending.mode, &client_id);
+
+            // Parse the authorization input - could be:
+            // 1. A full URL: http://localhost:9876/callback?code=...&state=...
+            // 2. The old format: code#state
+            // 3. Just the code
+            let input = req.code.trim();
+            let (code_string, state_string): (String, Option<String>) =
+                if let Ok(url) = url::Url::parse(input) {
+                    // Parse as URL
+                    let code = url
+                        .query_pairs()
+                        .find(|(k, _)| k == "code")
+                        .map(|(_, v)| v.to_string());
+                    let state = url
+                        .query_pairs()
+                        .find(|(k, _)| k == "state")
+                        .map(|(_, v)| v.to_string());
+                    (code.unwrap_or_default(), state)
+                } else if input.contains('#') {
+                    // Old format: code#state
+                    let mut parts = input.splitn(2, '#');
+                    let code = parts.next().unwrap_or(input).to_string();
+                    let state = parts.next().map(|s| s.to_string());
+                    (code, state)
+                } else {
+                    // Just the code
+                    (input.to_string(), None)
+                };
+
+            if code_string.is_empty() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "Authorization code not found. Please paste the full URL from your browser's address bar.".to_string(),
+                ));
+            }
+
+            let code_part = code_string.as_str();
+            let state_part = state_string.as_deref();
+
+            let client = reqwest::Client::new();
+            let token_response = client
+                .post("https://console.anthropic.com/v1/oauth/token")
+                .json(&serde_json::json!({
+                    "code": code_part,
+                    "state": state_part,
+                    "grant_type": "authorization_code",
+                    "client_id": client_id,
+                    "redirect_uri": redirect_uri,
+                    "code_verifier": pending.verifier
+                }))
+                .send()
+                .await
+                .map_err(|e| {
+                    (
+                        axum::http::StatusCode::BAD_GATEWAY,
+                        format!("Failed to exchange code: {}", e),
+                    )
+                })?;
+
+            if !token_response.status().is_success() {
+                let error_text = token_response.text().await.unwrap_or_default();
+                return Err((
+                    axum::http::StatusCode::BAD_GATEWAY,
+                    format!("OAuth token exchange failed: {}", error_text),
+                ));
+            }
+
+            let token_data: serde_json::Value = token_response.json().await.map_err(|e| {
+                (
+                    axum::http::StatusCode::BAD_GATEWAY,
+                    format!("Failed to parse token response: {}", e),
+                )
+            })?;
+
+            let auth_methods = provider_type.auth_methods();
+            let method = auth_methods.get(req.method_index);
+
+            // Check if this is "Create an API Key" method
+            let is_create_api_key = method
+                .map(|m| m.label.contains("Create") && m.label.contains("API Key"))
+                .unwrap_or(false);
+
+            if is_create_api_key {
+                // Create an API key using the access token
+                let access_token = token_data["access_token"].as_str().ok_or_else(|| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        "No access token in response".to_string(),
+                    )
+                })?;
+
+                let api_key_response = client
+                    .post("https://api.anthropic.com/api/oauth/claude_cli/create_api_key")
+                    .header("Authorization", format!("Bearer {}", access_token))
+                    .header("Content-Type", "application/json")
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        (
+                            StatusCode::BAD_GATEWAY,
+                            format!("Failed to create API key: {}", e),
+                        )
+                    })?;
+
+                if !api_key_response.status().is_success() {
+                    let error_text = api_key_response.text().await.unwrap_or_default();
+                    return Err((
+                        StatusCode::BAD_GATEWAY,
+                        format!("API key creation failed: {}", error_text),
+                    ));
+                }
+
+                let api_key_data: serde_json::Value =
+                    api_key_response.json().await.map_err(|e| {
+                        (
+                            StatusCode::BAD_GATEWAY,
+                            format!("Failed to parse API key response: {}", e),
+                        )
+                    })?;
+
+                let api_key = api_key_data["raw_key"].as_str().ok_or_else(|| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        "No API key in response".to_string(),
+                    )
+                })?;
+
+                // Store the API key
+                if let Err(e) = sync_api_key_to_opencode_auth(provider_type, api_key) {
+                    tracing::error!("Failed to sync API key to OpenCode: {}", e);
+                }
+
+                let config_path = get_opencode_config_path(&state.config.working_dir);
+                let mut opencode_config =
+                    read_opencode_config(&config_path).map_err(internal_error)?;
+
+                // Update use_for_backends if specified
+                if let Some(ref backends) = req.use_for_backends {
+                    set_provider_config_entry(
+                        &mut opencode_config,
+                        provider_type,
+                        None,
+                        None,
+                        None,
+                        req.use_for_backends.clone(),
+                        None,
+                    );
+                    if let Err(e) = write_opencode_config(&config_path, &opencode_config) {
+                        tracing::error!("Failed to write OpenCode config: {}", e);
+                    }
+                    // Save backends to separate state file
+                    if let Err(e) = update_provider_backends(
+                        &state.config.working_dir,
+                        provider_type.id(),
+                        backends.clone(),
+                    ) {
+                        tracing::error!("Failed to save provider backends: {}", e);
+                    }
+                }
+
+                let mut account_email = extract_and_save_account_email(
+                    &token_data,
+                    &state.config.working_dir,
+                    provider_type.id(),
+                    "Anthropic",
+                );
+
+                // Anthropic tokens don't include email claims — fetch via userinfo
+                if account_email.is_none() {
+                    if let Some(at) = token_data["access_token"].as_str() {
+                        if let Some(email) = fetch_anthropic_account_email(at).await {
+                            let _ = update_provider_account(
+                                &state.config.working_dir,
+                                provider_type.id(),
+                                email.clone(),
+                            );
+                            account_email = Some(email);
+                        }
+                    }
+                }
+
+                let default_provider = get_default_provider(&opencode_config);
+                let backends_state = read_provider_backends_state(&state.config.working_dir);
+                let config_entry = get_provider_config_entry(&opencode_config, provider_type);
+                let backends = backends_state.get(provider_type.id()).cloned();
+                let response = build_provider_response(
+                    provider_type,
+                    config_entry,
+                    Some(AuthKind::ApiKey),
+                    default_provider,
+                    backends,
+                    account_email.clone(),
+                );
+
+                tracing::info!("Created API key for provider: {} ({})", response.name, id);
+
+                Ok(Json(response))
+            } else {
+                // Store OAuth credentials (Claude Pro/Max mode)
+                let refresh_token = token_data["refresh_token"].as_str().ok_or_else(|| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        "No refresh token in response".to_string(),
+                    )
+                })?;
+
+                let access_token = token_data["access_token"].as_str().ok_or_else(|| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        "No access token in response".to_string(),
+                    )
+                })?;
+
+                let expires_in = token_data["expires_in"].as_i64().unwrap_or(3600);
+                let expires_at = chrono::Utc::now().timestamp_millis() + (expires_in * 1000);
+
+                tracing::info!(
+                    "OAuth credentials saved for provider: {} ({})",
+                    provider_type,
+                    id
+                );
+
+                // Sync to OpenCode's auth.json so OpenCode can use these credentials
+                if let Err(e) =
+                    sync_to_opencode_auth(provider_type, refresh_token, access_token, expires_at)
+                {
+                    tracing::error!("Failed to sync credentials to OpenCode: {}", e);
+                    // Don't fail the request, but log the error
+                }
+
+                // For Anthropic, also sync to Claude CLI credentials files so that
+                // find_host_claude_cli_credentials() picks up the fresh token instead
+                // of a stale one from a previous `claude /login`.
+                if matches!(provider_type, ProviderType::Anthropic) {
+                    for dir_path in &[
+                        std::path::PathBuf::from("/var/lib/opencode/.claude"),
+                        std::path::PathBuf::from("/root/.claude"),
+                    ] {
+                        if let Err(e) = write_claudecode_credentials_from_entry(
+                            dir_path,
+                            access_token,
+                            refresh_token,
+                            expires_at,
+                        ) {
+                            tracing::warn!(
+                                path = %dir_path.display(),
+                                error = %e,
+                                "Failed to sync OAuth token to Claude CLI credentials"
+                            );
+                        }
+                    }
+                }
+
+                let config_path = get_opencode_config_path(&state.config.working_dir);
+                let mut opencode_config =
+                    read_opencode_config(&config_path).map_err(internal_error)?;
+
+                // Update use_for_backends if specified
+                if let Some(ref backends) = req.use_for_backends {
+                    set_provider_config_entry(
+                        &mut opencode_config,
+                        provider_type,
+                        None,
+                        None,
+                        None,
+                        req.use_for_backends.clone(),
+                        None,
+                    );
+                    if let Err(e) = write_opencode_config(&config_path, &opencode_config) {
+                        tracing::error!("Failed to write OpenCode config: {}", e);
+                    }
+                    // Save backends to separate state file
+                    if let Err(e) = update_provider_backends(
+                        &state.config.working_dir,
+                        provider_type.id(),
+                        backends.clone(),
+                    ) {
+                        tracing::error!("Failed to save provider backends: {}", e);
+                    }
+                }
+
+                let mut account_email = extract_and_save_account_email(
+                    &token_data,
+                    &state.config.working_dir,
+                    provider_type.id(),
+                    "Anthropic",
+                );
+
+                // Anthropic tokens don't include email claims — fetch via userinfo
+                if account_email.is_none() {
+                    if let Some(at) = token_data["access_token"].as_str() {
+                        if let Some(email) = fetch_anthropic_account_email(at).await {
+                            let _ = update_provider_account(
+                                &state.config.working_dir,
+                                provider_type.id(),
+                                email.clone(),
+                            );
+                            account_email = Some(email);
+                        }
+                    }
+                }
+
+                let default_provider = get_default_provider(&opencode_config);
+                let backends_state = read_provider_backends_state(&state.config.working_dir);
+                let config_entry = get_provider_config_entry(&opencode_config, provider_type);
+                let backends = backends_state.get(provider_type.id()).cloned();
+                let response = build_provider_response(
+                    provider_type,
+                    config_entry,
+                    Some(AuthKind::OAuth),
+                    default_provider,
+                    backends,
+                    account_email.clone(),
+                );
+
+                Ok(Json(response))
+            }
+        }
+        ProviderType::OpenAI => {
+            let (code_opt, state_opt) = parse_openai_authorization_input(&req.code);
+            let Some(code) = code_opt else {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "Authorization code not found. Paste the full redirect URL or code."
+                        .to_string(),
+                ));
+            };
+
+            if let (Some(expected), Some(actual)) = (pending.state.as_ref(), state_opt.as_ref()) {
+                if expected != actual {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        "OAuth state mismatch. Please start the OAuth flow again.".to_string(),
+                    ));
+                }
+            }
+
+            let client = reqwest::Client::new();
+            let redirect_uri = openai_redirect_uri();
+            let token_body = url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("grant_type", "authorization_code")
+                .append_pair("client_id", OPENAI_CLIENT_ID)
+                .append_pair("code", &code)
+                .append_pair("code_verifier", &pending.verifier)
+                .append_pair("redirect_uri", &redirect_uri)
+                .finish();
+
+            let token_response = client
+                .post(OPENAI_TOKEN_URL)
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .body(token_body)
+                .send()
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        format!("Failed to exchange code: {}", e),
+                    )
+                })?;
+
+            if !token_response.status().is_success() {
+                let error_text = token_response.text().await.unwrap_or_default();
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    format!("OAuth token exchange failed: {}", error_text),
+                ));
+            }
+
+            let token_data: serde_json::Value = token_response.json().await.map_err(|e| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    format!("Failed to parse token response: {}", e),
+                )
+            })?;
+
+            let access_token = token_data["access_token"].as_str().ok_or_else(|| {
+                (
+                    axum::http::StatusCode::BAD_GATEWAY,
+                    "No access token in response".to_string(),
+                )
+            })?;
+
+            let refresh_token = token_data["refresh_token"].as_str().ok_or_else(|| {
+                (
+                    axum::http::StatusCode::BAD_GATEWAY,
+                    "No refresh token in response".to_string(),
+                )
+            })?;
+
+            let expires_in = token_data["expires_in"].as_i64().unwrap_or(3600);
+            let expires_at = chrono::Utc::now().timestamp_millis() + (expires_in * 1000);
+
+            if let Err(e) =
+                sync_to_opencode_auth(provider_type, refresh_token, access_token, expires_at)
+            {
+                tracing::error!("Failed to sync credentials to OpenCode: {}", e);
+            }
+
+            // Persist backend targeting for OpenAI.
+            let backends = req
+                .use_for_backends
+                .clone()
+                .unwrap_or_else(|| default_backends_for_provider(provider_type));
+            if let Err(e) = update_provider_backends(
+                &state.config.working_dir,
+                provider_type.id(),
+                backends.clone(),
+            ) {
+                tracing::error!("Failed to save provider backends: {}", e);
+            }
+
+            // If the user wants to use Codex, Codex CLI requires an API key. In the Codex CLI
+            // flow, this is minted by exchanging the id_token for an OpenAI API key.
+            if backends.iter().any(|b| b == "codex") {
+                let id_token = token_data.get("id_token").and_then(|v| v.as_str());
+                let id_token = id_token.ok_or_else(|| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        "OpenAI OAuth token response did not include id_token; cannot mint API key for Codex. Try reconnecting."
+                            .to_string(),
+                    )
+                })?;
+
+                match exchange_openai_id_token_for_api_key(&client, id_token).await {
+                    Ok(api_key) => {
+                        if let Err(e) = upsert_openai_api_key_in_ai_providers(
+                            &state.config.working_dir,
+                            &api_key,
+                        ) {
+                            tracing::error!("Failed to save OpenAI API key for Codex: {}", e);
+                            return Err((
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "Failed to save OpenAI API key for Codex".to_string(),
+                            ));
+                        }
+                        tracing::info!("Minted and stored OpenAI API key for Codex via OAuth");
+                    }
+                    Err(e) => {
+                        // Don't fail the entire OAuth callback – the OAuth credentials
+                        // are already saved and usable for OpenCode.  The API-key
+                        // minting can be retried later (e.g. on the next Codex mission).
+                        tracing::warn!("Failed to mint OpenAI API key for Codex (credentials saved, Codex may not work until platform org is set up): {}", e);
+                    }
+                }
+            }
+
+            let account_email = extract_and_save_account_email(
+                &token_data,
+                &state.config.working_dir,
+                provider_type.id(),
+                "OpenAI",
+            );
+
+            let config_path = get_opencode_config_path(&state.config.working_dir);
+            let opencode_config = read_opencode_config(&config_path).map_err(internal_error)?;
+            let backends_state = read_provider_backends_state(&state.config.working_dir);
+            let default_provider = get_default_provider(&opencode_config);
+            let config_entry = get_provider_config_entry(&opencode_config, provider_type);
+            let backends = backends_state.get(provider_type.id()).cloned();
+            let response = build_provider_response(
+                provider_type,
+                config_entry,
+                Some(AuthKind::OAuth),
+                default_provider,
+                backends,
+                account_email,
+            );
+
+            Ok(Json(response))
+        }
+        ProviderType::Google => {
+            // Parse the callback input (URL or code)
+            let (code_opt, state_opt) = parse_openai_authorization_input(&req.code);
+            let Some(code) = code_opt else {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "Authorization code not found. Paste the full redirect URL or code."
+                        .to_string(),
+                ));
+            };
+
+            // Validate state if present
+            if let (Some(expected), Some(actual)) = (pending.state.as_ref(), state_opt.as_ref()) {
+                if expected != actual {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        "OAuth state mismatch. Please start the OAuth flow again.".to_string(),
+                    ));
+                }
+            }
+
+            // Exchange code for tokens
+            let client = reqwest::Client::new();
+            let client_id = google_client_id();
+            let client_secret = google_client_secret();
+            let token_body = url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("client_id", client_id)
+                .append_pair("client_secret", client_secret)
+                .append_pair("code", &code)
+                .append_pair("grant_type", "authorization_code")
+                .append_pair("redirect_uri", GOOGLE_REDIRECT_URI)
+                .append_pair("code_verifier", &pending.verifier)
+                .finish();
+
+            let token_response = client
+                .post(GOOGLE_TOKEN_URL)
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .body(token_body)
+                .send()
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        format!("Failed to exchange code: {}", e),
+                    )
+                })?;
+
+            if !token_response.status().is_success() {
+                let error_text = token_response.text().await.unwrap_or_default();
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    format!("OAuth token exchange failed: {}", error_text),
+                ));
+            }
+
+            let token_data: serde_json::Value = token_response.json().await.map_err(|e| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    format!("Failed to parse token response: {}", e),
+                )
+            })?;
+
+            let access_token = token_data["access_token"].as_str().ok_or_else(|| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    "No access token in response".to_string(),
+                )
+            })?;
+
+            let refresh_token = token_data["refresh_token"].as_str().ok_or_else(|| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    "No refresh token in response".to_string(),
+                )
+            })?;
+
+            let expires_in = token_data["expires_in"].as_i64().unwrap_or(3600);
+            let expires_at = chrono::Utc::now().timestamp_millis() + (expires_in * 1000);
+
+            // Sync to OpenCode's auth.json
+            if let Err(e) =
+                sync_to_opencode_auth(provider_type, refresh_token, access_token, expires_at)
+            {
+                tracing::error!("Failed to sync Google credentials to OpenCode: {}", e);
+            }
+
+            let mut account_email = extract_and_save_account_email(
+                &token_data,
+                &state.config.working_dir,
+                provider_type.id(),
+                "Google",
+            );
+
+            // Google id_tokens usually contain email, but fall back to userinfo endpoint
+            if account_email.is_none() {
+                if let Some(email) = fetch_google_account_email(access_token).await {
+                    let _ = update_provider_account(
+                        &state.config.working_dir,
+                        provider_type.id(),
+                        email.clone(),
+                    );
+                    account_email = Some(email);
+                }
+            }
+
+            // Persist backend targeting for Google even if the callback omitted it.
+            let config_path = get_opencode_config_path(&state.config.working_dir);
+            let mut opencode_config = read_opencode_config(&config_path).map_err(internal_error)?;
+
+            let backends_list = req
+                .use_for_backends
+                .clone()
+                .unwrap_or_else(|| default_backends_for_provider(provider_type));
+            set_provider_config_entry(
+                &mut opencode_config,
+                provider_type,
+                None,
+                None,
+                None,
+                Some(backends_list.clone()),
+                None,
+            );
+            if let Err(e) = write_opencode_config(&config_path, &opencode_config) {
+                tracing::error!("Failed to write OpenCode config: {}", e);
+            }
+            if let Err(e) = update_provider_backends(
+                &state.config.working_dir,
+                provider_type.id(),
+                backends_list,
+            ) {
+                tracing::error!("Failed to save provider backends: {}", e);
+            }
+            let backends_state = read_provider_backends_state(&state.config.working_dir);
+            let default_provider = get_default_provider(&opencode_config);
+            let config_entry = get_provider_config_entry(&opencode_config, provider_type);
+            let backends = backends_state.get(provider_type.id()).cloned();
+            let response = build_provider_response(
+                provider_type,
+                config_entry,
+                Some(AuthKind::OAuth),
+                default_provider,
+                backends,
+                account_email,
+            );
+
+            tracing::info!("Google OAuth credentials saved for provider: {}", id);
+
+            Ok(Json(response))
+        }
+        _ => Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "OAuth not supported for this provider".to_string(),
+        )),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Proactive Token Refresh & Multi-Tier Sync (Solution #1, #2, #3)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// OAuth token refresh error types
+#[derive(Debug)]
+pub enum OAuthRefreshError {
+    /// Refresh token is invalid or expired (invalid_grant) - user needs to re-authenticate
+    InvalidGrant(String),
+    /// Other refresh errors (network, server errors, etc.)
+    Other(String),
+}
+
+impl std::fmt::Display for OAuthRefreshError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OAuthRefreshError::InvalidGrant(msg) => write!(f, "Invalid grant: {}", msg),
+            OAuthRefreshError::Other(msg) => write!(f, "{}", msg),
+        }
+    }
+}
+
+impl From<OAuthRefreshError> for String {
+    fn from(err: OAuthRefreshError) -> String {
+        err.to_string()
+    }
+}
+
+/// Internal function to refresh an OAuth token for any provider.
+///
+/// Returns (new_access_token, new_refresh_token, expires_at).
+/// This is called by the background token refresher task.
+///
+/// **Solution #2: Refresh Token Rotation Handling**
+/// This function ensures that when providers return a new refresh_token
+/// (like Anthropic does), we capture and return it so it can be saved.
+pub async fn refresh_oauth_token_internal(
+    provider_type: &ProviderType,
+    refresh_token: &str,
+) -> Result<(String, String, i64), OAuthRefreshError> {
+    let client = reqwest::Client::new();
+
+    match provider_type {
+        ProviderType::Anthropic => {
+            // Exchange refresh token for new access token
+            let token_response = client
+                .post("https://console.anthropic.com/v1/oauth/token")
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .form(&[
+                    ("grant_type", "refresh_token"),
+                    ("refresh_token", refresh_token),
+                    ("client_id", ANTHROPIC_CLIENT_ID),
+                ])
+                .send()
+                .await
+                .map_err(|e| {
+                    OAuthRefreshError::Other(format!("Failed to refresh Anthropic token: {}", e))
+                })?;
+
+            if !token_response.status().is_success() {
+                let status = token_response.status();
+                let error_text = token_response.text().await.unwrap_or_default();
+
+                // Check if the error is invalid_grant (expired/revoked refresh token)
+                if error_text.contains("invalid_grant") || error_text.contains("Invalid grant") {
+                    return Err(OAuthRefreshError::InvalidGrant(format!(
+                        "Anthropic refresh token expired or revoked ({}): {}",
+                        status, error_text
+                    )));
+                }
+
+                return Err(OAuthRefreshError::Other(format!(
+                    "Anthropic token refresh failed ({}): {}",
+                    status, error_text
+                )));
+            }
+
+            let token_data: serde_json::Value = token_response.json().await.map_err(|e| {
+                OAuthRefreshError::Other(format!("Failed to parse Anthropic token response: {}", e))
+            })?;
+
+            let new_access_token = token_data["access_token"].as_str().ok_or_else(|| {
+                OAuthRefreshError::Other(
+                    "No access token in Anthropic refresh response".to_string(),
+                )
+            })?;
+
+            // **Solution #2: Anthropic rotates refresh tokens - capture the new one**
+            let new_refresh_token = token_data["refresh_token"].as_str().ok_or_else(|| {
+                OAuthRefreshError::Other(
+                    "No refresh_token in Anthropic OAuth response - tokens may be rotating"
+                        .to_string(),
+                )
+            })?;
+
+            let expires_in = token_data["expires_in"].as_i64().unwrap_or(3600);
+            let expires_at = chrono::Utc::now().timestamp_millis() + (expires_in * 1000);
+
+            Ok((
+                new_access_token.to_string(),
+                new_refresh_token.to_string(),
+                expires_at,
+            ))
+        }
+        ProviderType::OpenAI => {
+            let (new_access, new_refresh, expires_at, _id_token) =
+                refresh_openai_oauth_tokens(&client, refresh_token).await?;
+
+            // **Solution #2: OpenAI may also rotate refresh tokens**
+            Ok((new_access, new_refresh, expires_at))
+        }
+        ProviderType::Google => {
+            // Google refresh token request
+            let token_response = client
+                .post("https://oauth2.googleapis.com/token")
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .form(&[
+                    ("grant_type", "refresh_token"),
+                    ("refresh_token", refresh_token),
+                    ("client_id", GOOGLE_CLIENT_ID),
+                    ("client_secret", GOOGLE_CLIENT_SECRET),
+                ])
+                .send()
+                .await
+                .map_err(|e| {
+                    OAuthRefreshError::Other(format!("Failed to refresh Google token: {}", e))
+                })?;
+
+            if !token_response.status().is_success() {
+                let status = token_response.status();
+                let error_text = token_response.text().await.unwrap_or_default();
+
+                // Check if the error is invalid_grant (expired/revoked refresh token)
+                if error_text.contains("invalid_grant") || error_text.contains("Invalid grant") {
+                    return Err(OAuthRefreshError::InvalidGrant(format!(
+                        "Google refresh token expired or revoked ({}): {}",
+                        status, error_text
+                    )));
+                }
+
+                return Err(OAuthRefreshError::Other(format!(
+                    "Google token refresh failed ({}): {}",
+                    status, error_text
+                )));
+            }
+
+            let token_data: serde_json::Value = token_response.json().await.map_err(|e| {
+                OAuthRefreshError::Other(format!("Failed to parse Google token response: {}", e))
+            })?;
+
+            let new_access_token = token_data["access_token"].as_str().ok_or_else(|| {
+                OAuthRefreshError::Other("No access token in Google refresh response".to_string())
+            })?;
+
+            // Google doesn't rotate refresh tokens - use the existing one
+            let new_refresh_token = refresh_token.to_string();
+
+            let expires_in = token_data["expires_in"].as_i64().unwrap_or(3600);
+            let expires_at = chrono::Utc::now().timestamp_millis() + (expires_in * 1000);
+
+            Ok((new_access_token.to_string(), new_refresh_token, expires_at))
+        }
+        ProviderType::Xai => {
+            let token_response = client
+                .post("https://auth.x.ai/oauth2/token")
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .form(&[
+                    ("grant_type", "refresh_token"),
+                    ("refresh_token", refresh_token),
+                    ("client_id", GROK_OAUTH_CLIENT_ID),
+                ])
+                .send()
+                .await
+                .map_err(|e| {
+                    OAuthRefreshError::Other(format!("Failed to refresh xAI token: {}", e))
+                })?;
+
+            if !token_response.status().is_success() {
+                let status = token_response.status();
+                let error_text = token_response.text().await.unwrap_or_default();
+                if error_text.contains("invalid_grant") || error_text.contains("Invalid grant") {
+                    return Err(OAuthRefreshError::InvalidGrant(format!(
+                        "xAI refresh token expired or revoked ({}): {}",
+                        status, error_text
+                    )));
+                }
+
+                return Err(OAuthRefreshError::Other(format!(
+                    "xAI token refresh failed ({}): {}",
+                    status, error_text
+                )));
+            }
+
+            let token_data: serde_json::Value = token_response.json().await.map_err(|e| {
+                OAuthRefreshError::Other(format!("Failed to parse xAI token response: {}", e))
+            })?;
+
+            let new_access_token = token_data["access_token"].as_str().ok_or_else(|| {
+                OAuthRefreshError::Other("No access token in xAI refresh response".to_string())
+            })?;
+            let new_refresh_token = token_data["refresh_token"]
+                .as_str()
+                .unwrap_or(refresh_token);
+            let expires_in = token_data["expires_in"].as_i64().unwrap_or(3600);
+            let expires_at = chrono::Utc::now().timestamp_millis() + (expires_in * 1000);
+
+            Ok((
+                new_access_token.to_string(),
+                new_refresh_token.to_string(),
+                expires_at,
+            ))
+        }
+        _ => Err(OAuthRefreshError::Other(format!(
+            "OAuth refresh not supported for provider type: {:?}",
+            provider_type
+        ))),
+    }
+}
+
+/// Sync OAuth credentials to all storage tiers atomically.
+///
+/// **Solution #3: Multi-Tier Token Sync**
+/// After a successful token refresh, we must update:
+/// 1. Tier 1: sandboxed.sh's canonical credential store (~/.sandboxed-sh/credentials.json)
+/// 2. Tier 2: OpenCode auth.json paths
+/// 3. Tier 3: Claude CLI credentials (~/.claude/.credentials.json) - Anthropic only
+///
+/// This ensures all components see the fresh tokens and prevents reconnection issues.
+pub fn sync_oauth_to_all_tiers(
+    provider_type: ProviderType,
+    refresh_token: &str,
+    access_token: &str,
+    expires_at: i64,
+) -> Result<(), String> {
+    // Tier 1: sandboxed.sh's canonical credential store
+    if let Err(e) =
+        write_sandboxed_credential(provider_type, refresh_token, access_token, expires_at)
+    {
+        tracing::error!(
+            provider = ?provider_type,
+            error = %e,
+            "Failed to sync token to Tier 1 (sandboxed-sh credentials)"
+        );
+        return Err(format!("Tier 1 sync failed: {}", e));
+    }
+
+    // Tier 2: OpenCode auth.json
+    if let Err(e) = sync_to_opencode_auth(provider_type, refresh_token, access_token, expires_at) {
+        tracing::error!(
+            provider = ?provider_type,
+            error = %e,
+            "Failed to sync token to Tier 2 (OpenCode auth.json)"
+        );
+        return Err(format!("Tier 2 sync failed: {}", e));
+    }
+
+    // Tier 3: Claude CLI credentials (Anthropic only)
+    if matches!(provider_type, ProviderType::Anthropic) {
+        for dir_path in &[
+            std::path::PathBuf::from("/var/lib/opencode/.claude"),
+            std::path::PathBuf::from("/root/.claude"),
+        ] {
+            if let Err(e) = write_claudecode_credentials_to_path(dir_path) {
+                tracing::warn!(
+                    provider = ?provider_type,
+                    path = %dir_path.display(),
+                    error = %e,
+                    "Failed to sync token to Tier 3 (Claude CLI credentials) - continuing"
+                );
+                // Don't fail the entire sync if Claude CLI sync fails
+            }
+        }
+    }
+
+    if matches!(provider_type, ProviderType::OpenAI) {
+        if let Some(account_id) = extract_chatgpt_account_id(access_token) {
+            let working_dir = PathBuf::from(home_dir());
+            if update_provider_oauth_for_chatgpt_account(
+                &working_dir,
+                &account_id,
+                access_token,
+                refresh_token,
+                expires_at,
+            ) {
+                tracing::info!(
+                    account_id = %account_id,
+                    "Synced OpenAI OAuth token to ai_providers.json"
+                );
+            } else {
+                tracing::debug!(
+                    account_id = %account_id,
+                    "No matching OpenAI provider row found while syncing OAuth token"
+                );
+            }
+        }
+    }
+
+    tracing::info!(
+        provider = ?provider_type,
+        "Successfully synced OAuth token to all storage tiers"
+    );
+
+    Ok(())
+}
+
+/// Refresh an OAuth token with file-based locking to prevent race conditions.
+///
+/// This is the preferred entry point for the background refresh loop. It:
+/// 1. Acquires an exclusive file lock so only one refresh runs at a time.
+/// 2. Re-reads the latest credentials from disk (another process may have
+///    already refreshed with a rotated token).
+/// 3. Skips the refresh only if another process already refreshed (token has
+///    a newer expiry than `known_expires_at`).
+/// 4. Calls `refresh_oauth_token_internal` and syncs results to all tiers.
+///
+/// `known_expires_at` is the expiry timestamp the caller observed before
+/// requesting the refresh. If the on-disk token has a *different* (newer)
+/// expiry after acquiring the lock, it means another process already
+/// refreshed and we can skip.  Pass `0` to always refresh.
+///
+/// Returns `(new_access_token, new_refresh_token, expires_at)` on success.
+pub async fn refresh_oauth_token_with_lock(
+    provider_type: ProviderType,
+    known_expires_at: i64,
+) -> Result<(String, String, i64), OAuthRefreshError> {
+    // Acquire exclusive lock — prevents concurrent refreshes from racing on
+    // the same rotating refresh token.
+    let _lock = match acquire_oauth_refresh_lock(provider_type) {
+        Ok(lock) => lock,
+        Err(_) => {
+            // Another process is refreshing. Wait and re-check.
+            tracing::info!(
+                provider = ?provider_type,
+                "Background refresher: another process holds the lock, waiting..."
+            );
+            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+
+            // Re-read credentials — the other process likely refreshed already.
+            if let Some(entry) = read_oauth_token_entry(provider_type) {
+                if entry.expires_at > known_expires_at && !oauth_token_expired(entry.expires_at) {
+                    tracing::info!(
+                        provider = ?provider_type,
+                        "Background refresher: token was refreshed by another process"
+                    );
+                    return Ok((entry.access_token, entry.refresh_token, entry.expires_at));
+                }
+            }
+
+            // Try once more to acquire the lock
+            acquire_oauth_refresh_lock(provider_type).map_err(|e| {
+                OAuthRefreshError::Other(format!("Could not acquire refresh lock: {}", e))
+            })?
+        }
+    };
+
+    // Re-read credentials from disk (someone else may have refreshed while we
+    // waited for the lock).
+    let entry = read_oauth_token_entry(provider_type).ok_or_else(|| {
+        OAuthRefreshError::Other(format!(
+            "No OAuth entry found for {:?} after acquiring lock",
+            provider_type
+        ))
+    })?;
+
+    // Skip only if another process already refreshed (the on-disk token has a
+    // newer expiry than what the caller saw). This avoids re-using a rotated
+    // refresh token that's already been consumed.
+    if entry.expires_at > known_expires_at && !oauth_token_expired(entry.expires_at) {
+        tracing::info!(
+            provider = ?provider_type,
+            old_expires_at = known_expires_at,
+            new_expires_at = entry.expires_at,
+            "Background refresher: token was already refreshed by another process, skipping"
+        );
+        return Ok((entry.access_token, entry.refresh_token, entry.expires_at));
+    }
+
+    let refresh_token_prefix = if entry.refresh_token.len() > 12 {
+        &entry.refresh_token[..12]
+    } else {
+        &entry.refresh_token
+    };
+    tracing::info!(
+        provider = ?provider_type,
+        refresh_token_prefix = %refresh_token_prefix,
+        expires_at = entry.expires_at,
+        "Background refresher: refreshing token (holding lock)"
+    );
+
+    // Perform the actual refresh using the latest refresh token from disk.
+    let (new_access, new_refresh, expires_at) =
+        refresh_oauth_token_internal(&provider_type, &entry.refresh_token).await?;
+
+    // Sync to all storage tiers while we still hold the lock.
+    sync_oauth_to_all_tiers(provider_type, &new_refresh, &new_access, expires_at)
+        .map_err(|e| OAuthRefreshError::Other(format!("Tier sync failed: {}", e)))?;
+
+    tracing::info!(
+        provider = ?provider_type,
+        new_expires_at = expires_at,
+        "Background refresher: successfully refreshed and synced token"
+    );
+
+    Ok((new_access, new_refresh, expires_at))
+    // _lock is dropped here, releasing the file lock
+}

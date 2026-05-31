@@ -1,0 +1,13 @@
+[features]
+seeds = false
+skip-lint = false
+
+[programs.devnet]
+phantom_mat_pass = "4KQQWk1TyeEsZSWJ98eCqPJet951Hjia1cQSFxi7DcWr"
+
+[provider]
+cluster = "devnet"
+wallet = "~/.config/solana/id.json"
+
+[registry]
+url = "https://api.apr.dev"

@@ -1,0 +1,37 @@
+{
+  "name": "wallet-whisperer",
+  "version": "1.0.0",
+  "description": "Reverse-engineer any wallet's trading personality from on-chain history. Narrate their best and worst trades. Mirror their style with explicit per-trade confirmation.",
+  "type": "module",
+  "bin": {
+    "wallet-whisperer": "./bin/wallet-whisperer.js"
+  },
+  "files": [
+    "bin",
+    "lib",
+    "web",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node bin/wallet-whisperer.js",
+    "web": "node web/server.js"
+  },
+  "keywords": [
+    "okx",
+    "onchainos",
+    "wallet-analysis",
+    "copy-trading",
+    "trading-persona",
+    "smart-money",
+    "cli"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Temitope15/wallet-whisperer"
+  }
+}

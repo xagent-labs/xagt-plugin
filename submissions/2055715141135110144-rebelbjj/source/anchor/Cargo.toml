@@ -1,0 +1,10 @@
+[workspace]
+members = ["programs/phantom_mat_pass"]
+resolver = "2"
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+overflow-checks = true
+opt-level = 3
+

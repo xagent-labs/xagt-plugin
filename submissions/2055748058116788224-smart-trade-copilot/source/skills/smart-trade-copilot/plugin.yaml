@@ -1,0 +1,25 @@
+schema_version: 1
+name: smart-trade-copilot
+version: "1.0.0"
+description: "Disciplined 'should I buy this token?' copilot — chains security, market, signals, memepump, holder-cluster and DeFi intelligence into one safety-gated buy/avoid verdict, then executes the swap only after explicit confirmation."
+author:
+  name: "Victor Jayeoba"
+  github: "victorjayeoba"
+license: MIT
+category: trading-strategy
+tags:
+  - trading
+  - security
+  - due-diligence
+  - risk-management
+  - swap
+  - signals
+  - defi
+
+components:
+  skill:
+    dir: skills/smart-trade-copilot
+
+# All on-chain reads/writes go through the onchainos CLI (OKX Web3 backend).
+# No third-party data sources are called directly.
+api_calls: []

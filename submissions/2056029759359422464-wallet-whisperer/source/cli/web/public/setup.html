@@ -1,0 +1,461 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Wallet Whisperer — Setup</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Poppins:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root { --bg:#fff; --ink:#0a0f1a; --muted:#6b7280; --line:#e6ecf5; --blue:#2563eb; --blue-deep:#1e40af; }
+    html, body { background: var(--bg); color: var(--ink); font-family: 'Poppins', system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+    .serif { font-family: 'Instrument Serif', 'Times New Roman', serif; letter-spacing: -0.012em; }
+    .mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+    html { scroll-behavior: smooth; }
+
+    .blob-stage { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 0; }
+    .blob { position: absolute; border-radius: 50%; filter: blur(110px); opacity: 0.35; }
+    .blob.b1 { width: 480px; height: 480px; background: radial-gradient(circle, #60a5fa, transparent 65%); top: -180px; left: 15%; animation: float-a 18s ease-in-out infinite; }
+    .blob.b2 { width: 420px; height: 420px; background: radial-gradient(circle, #c7d2fe, transparent 65%); top: -120px; right: 10%; animation: float-b 22s ease-in-out infinite; }
+    @keyframes float-a { 0%,100% { transform: translate(0,0) scale(1); } 50% { transform: translate(40px, 60px) scale(1.08); } }
+    @keyframes float-b { 0%,100% { transform: translate(0,0) scale(1); } 50% { transform: translate(-40px, 50px) scale(1.06); } }
+
+    .fade-up { opacity: 0; transform: translateY(16px); animation: fadeUp .9s cubic-bezier(.18,.7,.2,1) forwards; }
+    .d1 { animation-delay: .08s; } .d2 { animation-delay: .18s; } .d3 { animation-delay: .30s; }
+    @keyframes fadeUp { from { opacity:0; transform: translateY(16px); } to { opacity:1; transform: translateY(0); } }
+
+    .reveal { opacity: 0; transform: translateY(20px); transition: opacity 0.9s cubic-bezier(.18,.7,.2,1), transform 0.9s cubic-bezier(.18,.7,.2,1); }
+    .reveal.visible { opacity: 1; transform: translateY(0); }
+
+    .btn { display: inline-flex; align-items: center; gap: .55rem; padding: .8rem 1.5rem; border-radius: 999px; font-weight: 500; font-size: .92rem; transition: all .25s cubic-bezier(.2,.7,.2,1); position: relative; overflow: hidden; }
+    .btn-primary { background: linear-gradient(135deg, var(--blue) 0%, var(--blue-deep) 100%); color: white; box-shadow: 0 10px 24px -10px rgba(37,99,235,0.55); }
+    .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 18px 36px -12px rgba(37,99,235,0.65); }
+    .btn-secondary { border: 1px solid var(--line); color: var(--ink); background: white; }
+    .btn-secondary:hover { border-color: var(--blue); color: var(--blue); transform: translateY(-2px); }
+    .btn-primary::after { content: ''; position: absolute; inset: 0; background: linear-gradient(120deg, transparent 30%, rgba(255,255,255,0.35) 50%, transparent 70%); transform: translateX(-100%); transition: transform .8s ease; }
+    .btn-primary:hover::after { transform: translateX(100%); }
+
+    .navbar { backdrop-filter: blur(18px) saturate(1.2); background: rgba(255,255,255,0.78); }
+
+    .codepad { background: var(--ink); color: #cbd5e1; border-radius: 10px; padding: .85rem 1.05rem; font-family: 'JetBrains Mono', monospace; font-size: .8rem; display: flex; justify-content: space-between; align-items: center; gap: .8rem; }
+    .copy-btn { color: #94a3b8; font-size: .7rem; padding: .25rem .55rem; border-radius: 6px; transition: all .18s ease; cursor: pointer; user-select: none; border: 1px solid #334155; flex-shrink: 0; }
+    .copy-btn:hover { background: #1f2937; color: #e0e7ff; border-color: #475569; }
+    .copy-btn.copied { color: #34d399; border-color: #34d399; }
+
+    /* Step circles */
+    .step-num { width: 36px; height: 36px; border-radius: 50%;
+      background: linear-gradient(135deg, var(--blue) 0%, var(--blue-deep) 100%);
+      color: white; display: inline-flex; align-items: center; justify-content: center;
+      font-family: 'Instrument Serif', serif; font-size: 1.15rem;
+      box-shadow: 0 8px 18px -8px rgba(37,99,235,0.55);
+      flex-shrink: 0;
+    }
+
+    /* Tab buttons */
+    .tab-btn { padding: .65rem 1.1rem; border-radius: 12px; font-size: .85rem; color: #6b7280; transition: all .2s ease; cursor: pointer; border: 1px solid transparent; font-weight: 500; }
+    .tab-btn.active { background: #eff6ff; color: var(--blue); border-color: rgba(37,99,235,0.18); }
+    .tab-btn:hover:not(.active) { color: #1f2937; }
+
+    .pulse-dot { width: 8px; height: 8px; border-radius: 50%; background: #34d399; position: relative; display: inline-block; }
+    .pulse-dot::after { content: ''; position: absolute; inset: -4px; border-radius: 50%; background: #34d399; opacity: 0.45; animation: pulse 1.8s ease-out infinite; }
+    @keyframes pulse { 0% { transform: scale(0.85); opacity: 0.6; } 100% { transform: scale(1.8); opacity: 0; } }
+
+    /* Install hero (Surface B) */
+    .install-hero {
+      background: linear-gradient(135deg, #0a0f1a 0%, #0f1f3a 100%);
+      color: #e2e8f0; border-radius: 20px; padding: 2rem;
+      position: relative; overflow: hidden;
+      box-shadow: 0 20px 50px -20px rgba(15,23,42,0.45);
+    }
+    .install-hero::before {
+      content: ''; position: absolute; inset: 0;
+      background: radial-gradient(circle at 10% 0%, rgba(96,165,250,0.28), transparent 50%),
+                  radial-gradient(circle at 90% 100%, rgba(139,92,246,0.28), transparent 50%);
+      pointer-events: none;
+    }
+    .install-hero .terminal {
+      font-family: 'JetBrains Mono', monospace; font-size: 1.4rem;
+      position: relative; z-index: 1;
+    }
+    .install-hero .dollar { color: #34d399; margin-right: .6rem; }
+    .install-hero .cmd { color: #f1f5f9; }
+    .install-hero .arg { color: #60a5fa; }
+    .install-hero .host { color: #c084fc; display: inline-block; min-width: 5.5ch; transition: opacity .35s ease, transform .35s ease; }
+    .install-hero .host.swap { opacity: 0; transform: translateY(-3px); }
+    .install-hero .cursor-blink { display: inline-block; width: 10px; height: 1.2em; background: #f1f5f9; vertical-align: text-bottom; margin-left: 4px; animation: blink 1s steps(2) infinite; }
+    @keyframes blink { 50% { opacity: 0; } }
+    .install-hero .chips { display: flex; gap: .4rem; flex-wrap: wrap; margin-top: 1.25rem; position: relative; z-index: 1; }
+    .install-hero .chip { font-family: 'JetBrains Mono', monospace; font-size: .72rem; padding: .25rem .65rem; border-radius: 999px; background: rgba(255,255,255,0.05); color: #cbd5e1; border: 1px solid rgba(255,255,255,0.08); transition: all .3s ease; }
+    .install-hero .chip.active { background: rgba(96,165,250,0.15); color: #93c5fd; border-color: rgba(96,165,250,0.5); }
+
+    /* Sticky stage indicator */
+    .stage-rail { position: sticky; top: 7rem; }
+    .stage-item { display: flex; align-items: center; gap: .65rem; padding: .55rem .8rem; border-radius: 10px; color: #64748b; font-size: .85rem; font-weight: 500; cursor: pointer; transition: all .2s ease; }
+    .stage-item:hover { color: #0f172a; background: #f8fafc; }
+    .stage-item.active { background: #eff6ff; color: var(--blue); }
+    .stage-item .num { width: 22px; height: 22px; border-radius: 50%; background: #e2e8f0; color: #64748b; font-size: .7rem; display: inline-flex; align-items: center; justify-content: center; font-family: 'JetBrains Mono', monospace; flex-shrink: 0; }
+    .stage-item.active .num { background: var(--blue); color: white; }
+  </style>
+</head>
+<body>
+
+  <nav class="navbar sticky top-0 z-30 border-b border-slate-200/60">
+    <div class="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
+      <a href="/" class="flex items-center gap-2.5">
+        <div class="w-8 h-8 rounded-xl bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-white text-sm font-bold shadow-lg shadow-blue-500/30">W</div>
+        <span class="font-semibold tracking-tight">Wallet Whisperer</span>
+      </a>
+      <div class="flex items-center gap-6 text-sm">
+        <a href="/" class="text-slate-600 hover:text-slate-900 transition hidden sm:block">Home</a>
+        <a href="/whisper" class="btn btn-primary text-xs px-4 py-2">Open app →</a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- HERO -->
+  <section class="relative overflow-hidden">
+    <div class="blob-stage"><div class="blob b1"></div><div class="blob b2"></div></div>
+    <div class="relative max-w-3xl mx-auto px-6 pt-16 pb-12 text-center">
+      <div class="fade-up inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/70 border border-blue-100 backdrop-blur text-xs text-slate-700 mb-6">
+        <span class="pulse-dot"></span>
+        ~5 minutes · macOS or Linux
+      </div>
+      <h1 class="serif fade-up d1 text-[2.6rem] sm:text-[3.4rem] leading-[1.05] tracking-tight text-slate-900">
+        Set up <em class="italic">Wallet Whisperer</em> on your machine.
+      </h1>
+      <p class="fade-up d2 mt-5 text-slate-600 text-base leading-relaxed max-w-xl mx-auto">
+        Three short stages. You'll install the onchainos backbone, then either the standalone CLI, the agent skill, or both.
+      </p>
+    </div>
+  </section>
+
+  <!-- MAIN -->
+  <div class="max-w-7xl mx-auto px-6 pb-32 grid grid-cols-1 lg:grid-cols-[220px_1fr] gap-10">
+
+    <!-- LEFT RAIL: stages -->
+    <aside class="stage-rail space-y-1">
+      <a href="#stage-1" class="stage-item active"><span class="num">1</span> Prerequisites</a>
+      <a href="#stage-2" class="stage-item"><span class="num">2</span> Onchainos login</a>
+      <a href="#stage-3" class="stage-item"><span class="num">3</span> Pick a surface</a>
+      <div class="border-t border-slate-200 my-3"></div>
+      <a href="#cli" class="stage-item ml-3"><span class="num" style="background:#f1f5f9">A</span> CLI</a>
+      <a href="#skill" class="stage-item ml-3"><span class="num" style="background:#f1f5f9">B</span> Agent skill</a>
+      <a href="#web" class="stage-item ml-3"><span class="num" style="background:#f1f5f9">C</span> Web app</a>
+    </aside>
+
+    <!-- RIGHT: stages content -->
+    <main class="space-y-16">
+
+      <!-- STAGE 1 -->
+      <section id="stage-1" class="reveal">
+        <div class="flex items-start gap-5">
+          <span class="step-num">1</span>
+          <div class="flex-1">
+            <div class="text-xs uppercase tracking-widest text-slate-500 mono">Stage 1</div>
+            <h2 class="serif text-3xl text-slate-900 mt-1">Install prerequisites</h2>
+            <p class="text-slate-600 mt-3">You need Node.js 18+ and the <span class="mono text-slate-900">onchainos</span> CLI. Both are quick.</p>
+
+            <div class="mt-6 space-y-4">
+              <div>
+                <div class="text-sm font-semibold text-slate-900 mb-2">Node.js (check first)</div>
+                <div class="codepad"><span><span class="text-emerald-400">$</span> node --version</span><span class="copy-btn" data-copy="node --version">copy</span></div>
+                <p class="text-xs text-slate-500 mt-2">If you don't have Node 18+, install via <a href="https://nodejs.org" target="_blank" rel="noopener" class="text-blue-600 hover:underline">nodejs.org</a> or use <span class="mono">nvm install 20</span>.</p>
+              </div>
+
+              <div>
+                <div class="text-sm font-semibold text-slate-900 mb-2">Onchainos CLI (the data backbone)</div>
+                <div class="codepad"><span><span class="text-emerald-400">$</span> curl -sSL https://raw.githubusercontent.com/okx/onchainos-skills/main/install.sh | sh</span><span class="copy-btn" data-copy="curl -sSL https://raw.githubusercontent.com/okx/onchainos-skills/main/install.sh | sh">copy</span></div>
+                <p class="text-xs text-slate-500 mt-2">Installs the binary to <span class="mono">~/.local/bin/onchainos</span>. Wallet Whisperer wraps this CLI; nothing else talks to OKX.</p>
+              </div>
+
+              <div>
+                <div class="text-sm font-semibold text-slate-900 mb-2">Make sure your PATH picks it up</div>
+                <div class="codepad"><span><span class="text-emerald-400">$</span> export PATH="$HOME/.local/bin:$PATH"</span><span class="copy-btn" data-copy='export PATH="$HOME/.local/bin:$PATH"'>copy</span></div>
+                <p class="text-xs text-slate-500 mt-2">Add that line to your <span class="mono">~/.zshrc</span> or <span class="mono">~/.bashrc</span> so it sticks.</p>
+              </div>
+
+              <div>
+                <div class="text-sm font-semibold text-slate-900 mb-2">Verify</div>
+                <div class="codepad"><span><span class="text-emerald-400">$</span> onchainos --version</span><span class="copy-btn" data-copy="onchainos --version">copy</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- STAGE 2 -->
+      <section id="stage-2" class="reveal">
+        <div class="flex items-start gap-5">
+          <span class="step-num">2</span>
+          <div class="flex-1">
+            <div class="text-xs uppercase tracking-widest text-slate-500 mono">Stage 2</div>
+            <h2 class="serif text-3xl text-slate-900 mt-1">Log in to onchainos</h2>
+            <p class="text-slate-600 mt-3">Free for the first 1,000,000 API calls / month. No payment, no wallet funding, no signature needed.</p>
+
+            <div class="mt-6 space-y-4">
+              <div>
+                <div class="text-sm font-semibold text-slate-900 mb-2">Request a one-time code</div>
+                <div class="codepad"><span><span class="text-emerald-400">$</span> onchainos wallet login your@email.com</span><span class="copy-btn" data-copy="onchainos wallet login your@email.com">copy</span></div>
+                <p class="text-xs text-slate-500 mt-2">Check your inbox for the verification code.</p>
+              </div>
+              <div>
+                <div class="text-sm font-semibold text-slate-900 mb-2">Enter the code</div>
+                <div class="codepad"><span><span class="text-emerald-400">$</span> onchainos wallet verify 123456</span><span class="copy-btn" data-copy="onchainos wallet verify 123456">copy</span></div>
+              </div>
+              <div>
+                <div class="text-sm font-semibold text-slate-900 mb-2">Confirm</div>
+                <div class="codepad"><span><span class="text-emerald-400">$</span> onchainos wallet status</span><span class="copy-btn" data-copy="onchainos wallet status">copy</span></div>
+                <p class="text-xs text-slate-500 mt-2">Should show <span class="mono text-emerald-700">"loggedIn": true</span>.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- STAGE 3 -->
+      <section id="stage-3" class="reveal">
+        <div class="flex items-start gap-5">
+          <span class="step-num">3</span>
+          <div class="flex-1">
+            <div class="text-xs uppercase tracking-widest text-slate-500 mono">Stage 3</div>
+            <h2 class="serif text-3xl text-slate-900 mt-1">Pick a surface</h2>
+            <p class="text-slate-600 mt-3">Clone the repo once, then install whichever interface you want. All three share the same persona engine.</p>
+
+            <div class="mt-6">
+              <div class="text-sm font-semibold text-slate-900 mb-2">Clone the repo</div>
+              <div class="codepad"><span><span class="text-emerald-400">$</span> git clone https://github.com/Temitope15/wallet-whisperer.git && cd wallet-whisperer</span><span class="copy-btn" data-copy="git clone https://github.com/Temitope15/wallet-whisperer.git && cd wallet-whisperer">copy</span></div>
+              <p class="text-xs text-slate-500 mt-2">Everything below assumes you're inside this directory.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- CLI -->
+      <section id="cli" class="reveal scroll-mt-24">
+        <div class="border border-slate-200 rounded-2xl p-7 bg-white">
+          <div class="flex items-center justify-between flex-wrap gap-3">
+            <div>
+              <div class="text-xs uppercase tracking-widest text-slate-500 mono">Surface A</div>
+              <h3 class="serif text-2xl text-slate-900 mt-1">CLI (terminal)</h3>
+            </div>
+            <span class="text-xs px-2 py-1 rounded-full bg-blue-100 text-blue-800 font-medium">~30 seconds</span>
+          </div>
+          <p class="text-slate-600 text-sm mt-3">For one-shot lookups, scripts, and CI.</p>
+
+          <div class="mt-5 space-y-4">
+            <div>
+              <div class="text-sm font-semibold text-slate-900 mb-2">Install globally</div>
+              <div class="codepad"><span><span class="text-emerald-400">$</span> cd cli && npm install -g .</span><span class="copy-btn" data-copy="cd cli && npm install -g .">copy</span></div>
+            </div>
+            <div>
+              <div class="text-sm font-semibold text-slate-900 mb-2">Profile a wallet</div>
+              <div class="codepad"><span><span class="text-emerald-400">$</span> wallet-whisperer whisper 21czpZj3BxT75dVbzmUJtE5QznJrLrYHHaF5pT4CpWM1</span><span class="copy-btn" data-copy="wallet-whisperer whisper 21czpZj3BxT75dVbzmUJtE5QznJrLrYHHaF5pT4CpWM1">copy</span></div>
+            </div>
+            <div class="text-xs text-slate-500 mt-2">
+              Other commands:
+              <span class="mono text-slate-700">wallet-whisperer replay &lt;addr&gt;</span>,
+              <span class="mono text-slate-700">wallet-whisperer mirror &lt;addr&gt;</span>,
+              <span class="mono text-slate-700">--help</span>.
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- AGENT SKILL -->
+      <section id="skill" class="reveal scroll-mt-24">
+        <div class="border border-slate-200 rounded-2xl p-7 bg-white">
+          <div class="flex items-center justify-between flex-wrap gap-3">
+            <div>
+              <div class="text-xs uppercase tracking-widest text-slate-500 mono">Surface B</div>
+              <h3 class="serif text-2xl text-slate-900 mt-1">Agent skill (Claude Code / Cursor / …)</h3>
+            </div>
+            <span class="text-xs px-2 py-1 rounded-full bg-violet-100 text-violet-800 font-medium">mirror enabled</span>
+          </div>
+          <p class="text-slate-600 text-sm mt-3">Adds the interactive mirror loop with one-tap per-trade confirmation inside your agent host.</p>
+
+          <!-- One-line install hero -->
+          <div class="install-hero mt-6">
+            <div class="text-xs uppercase tracking-widest text-blue-300 mono mb-3 relative z-10">One command for every host</div>
+            <div class="terminal">
+              <span class="dollar">$</span><span class="cmd">wallet-whisperer</span> <span class="arg">init</span> <span id="setup-host-cycle" class="host">claude</span><span class="cursor-blink"></span>
+            </div>
+            <div class="chips" id="setup-host-chips">
+              <span class="chip active" data-host="claude">Claude Code</span>
+              <span class="chip" data-host="cursor">Cursor</span>
+              <span class="chip" data-host="codex">Codex CLI</span>
+              <span class="chip" data-host="opencode">OpenCode</span>
+              <span class="chip" data-host="windsurf">Windsurf</span>
+              <span class="chip" data-host="agents">AgentSkills</span>
+            </div>
+          </div>
+
+          <div class="text-xs text-slate-500 mt-5 mb-3 font-medium uppercase tracking-wider">Per-host walkthrough</div>
+
+          <div class="flex gap-2 flex-wrap">
+            <button class="tab-btn active" data-tab="claude">Claude Code</button>
+            <button class="tab-btn" data-tab="cursor">Cursor</button>
+            <button class="tab-btn" data-tab="codex">Codex CLI</button>
+            <button class="tab-btn" data-tab="opencode">OpenCode</button>
+          </div>
+
+          <div id="skill-body" class="mt-5"></div>
+        </div>
+      </section>
+
+      <!-- WEB APP -->
+      <section id="web" class="reveal scroll-mt-24">
+        <div class="border border-slate-200 rounded-2xl p-7 bg-white">
+          <div class="flex items-center justify-between flex-wrap gap-3">
+            <div>
+              <div class="text-xs uppercase tracking-widest text-slate-500 mono">Surface C</div>
+              <h3 class="serif text-2xl text-slate-900 mt-1">Web app (local)</h3>
+            </div>
+            <span class="text-xs px-2 py-1 rounded-full bg-emerald-100 text-emerald-800 font-medium">visual</span>
+          </div>
+          <p class="text-slate-600 text-sm mt-3">Zero-dependency Node server, opens at <span class="mono">localhost:4444</span>. Same engine as the CLI, plus a live OKX skills sidebar.</p>
+
+          <div class="mt-5 space-y-4">
+            <div>
+              <div class="text-sm font-semibold text-slate-900 mb-2">Start the server</div>
+              <div class="codepad"><span><span class="text-emerald-400">$</span> cd cli && npm run web</span><span class="copy-btn" data-copy="cd cli && npm run web">copy</span></div>
+            </div>
+            <div>
+              <div class="text-sm font-semibold text-slate-900 mb-2">Open in your browser</div>
+              <div class="codepad"><span class="text-slate-400">→</span><span class="ml-1 text-slate-200">http://localhost:4444</span><span class="copy-btn" data-copy="http://localhost:4444">copy</span></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- CALL TO ACTION -->
+      <section class="reveal text-center py-10">
+        <div class="serif text-3xl text-slate-900">All set?</div>
+        <p class="text-slate-600 mt-3">Skip to the live app and paste your first wallet.</p>
+        <a href="/whisper" class="btn btn-primary mt-6 inline-flex">
+          Open the app
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
+        </a>
+      </section>
+
+    </main>
+  </div>
+
+  <footer class="border-t border-slate-200 bg-gradient-to-b from-white to-slate-50/50">
+    <div class="max-w-7xl mx-auto px-6 py-10 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-500">
+      <span class="mono">wallet-whisperer · v1.0.0</span>
+      <span>Built on OKX OnchainOS · MIT licensed</span>
+      <a href="https://github.com/Temitope15/wallet-whisperer" target="_blank" rel="noopener" class="text-slate-600 hover:text-blue-600 transition inline-flex items-center gap-1.5">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.56 0-.27-.01-1-.02-1.96-3.2.7-3.88-1.54-3.88-1.54-.52-1.33-1.28-1.69-1.28-1.69-1.05-.72.08-.71.08-.71 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.7 0-1.26.45-2.29 1.19-3.1-.12-.29-.51-1.46.11-3.04 0 0 .97-.31 3.18 1.18.92-.26 1.91-.39 2.89-.39.98 0 1.97.13 2.89.39 2.21-1.49 3.18-1.18 3.18-1.18.62 1.58.23 2.75.11 3.04.74.81 1.19 1.84 1.19 3.1 0 4.43-2.7 5.41-5.27 5.7.41.35.77 1.05.77 2.11 0 1.52-.01 2.74-.01 3.11 0 .31.21.67.8.56C20.21 21.39 23.5 17.08 23.5 12 23.5 5.65 18.35.5 12 .5z"/></svg>
+        GitHub →
+      </a>
+    </div>
+  </footer>
+
+<script>
+  const io = new IntersectionObserver((entries) => {
+    for (const e of entries) { if (e.isIntersecting) { e.target.classList.add('visible'); io.unobserve(e.target); } }
+  }, { threshold: 0.12 });
+  document.querySelectorAll('.reveal').forEach((el) => io.observe(el));
+
+  document.querySelectorAll('.copy-btn').forEach((b) => {
+    b.addEventListener('click', () => {
+      const text = b.getAttribute('data-copy') || '';
+      navigator.clipboard.writeText(text).then(() => {
+        const orig = b.textContent; b.textContent = 'copied'; b.classList.add('copied');
+        setTimeout(() => { b.textContent = orig; b.classList.remove('copied'); }, 1500);
+      });
+    });
+  });
+
+  // Stage active indicator
+  const stageLinks = document.querySelectorAll('.stage-item');
+  function activate(href) {
+    stageLinks.forEach((l) => l.classList.toggle('active', l.getAttribute('href') === href));
+  }
+  const sections = ['#stage-1', '#stage-2', '#stage-3', '#cli', '#skill', '#web'];
+  const scrollSpy = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (e.isIntersecting) activate('#' + e.target.id);
+    }
+  }, { rootMargin: '-40% 0px -50% 0px' });
+  sections.forEach((s) => { const el = document.querySelector(s); if (el) scrollSpy.observe(el); });
+
+  // Agent host tabs
+  const tabBody = document.getElementById('skill-body');
+  const hostTabs = {
+    claude: {
+      name: 'Claude Code', key: 'claude', openCmd: 'claude',
+    },
+    cursor: {
+      name: 'Cursor', key: 'cursor', openCmd: '# Open Cursor and start a new chat in any project',
+    },
+    codex: {
+      name: 'Codex CLI', key: 'codex', openCmd: 'codex',
+    },
+    opencode: {
+      name: 'OpenCode', key: 'opencode', openCmd: 'opencode',
+    },
+  };
+  function stepsFor(host) {
+    return [
+      { title: 'Install the CLI (one-time)', cmd: 'cd cli && npm install -g .' },
+      { title: `Install the skill into ${host.name}`, cmd: `wallet-whisperer init ${host.key}` },
+      { title: `Open ${host.name}`, cmd: host.openCmd },
+      { title: 'Try a trigger phrase', cmd: 'whisper this wallet 21czpZj3BxT75dVbzmUJtE5QznJrLrYHHaF5pT4CpWM1' },
+    ];
+  }
+  function renderHost(t) {
+    document.querySelectorAll('.tab-btn').forEach((b) => b.classList.toggle('active', b.dataset.tab === t));
+    const host = hostTabs[t];
+    const steps = stepsFor(host);
+    tabBody.innerHTML = `
+      <p class="text-xs text-slate-500 mb-4">From inside the <span class="mono text-slate-700">wallet-whisperer</span> directory you cloned in Stage 3:</p>
+      <ol class="space-y-4">
+        ${steps.map((s, i) => `
+          <li>
+            <div class="flex items-center gap-2 mb-2">
+              <span class="w-6 h-6 rounded-full bg-slate-100 text-slate-600 text-xs flex items-center justify-center mono font-medium">${i+1}</span>
+              <span class="text-sm font-semibold text-slate-900">${s.title}</span>
+            </div>
+            <div class="codepad"><span class="${s.cmd.startsWith('#') ? 'text-slate-400' : ''}">${s.cmd.startsWith('#') ? '' : '<span class="text-emerald-400">$</span> '}${s.cmd.replace('<', '&lt;')}</span><span class="copy-btn" data-copy="${s.cmd.replace(/"/g, '&quot;')}">copy</span></div>
+          </li>
+        `).join('')}
+      </ol>
+      <p class="text-xs text-slate-500 mt-5">After step 4, ${host.name} reads the skill instructions and starts pulling the wallet's history through onchainos.</p>
+    `;
+    // re-wire copy buttons
+    tabBody.querySelectorAll('.copy-btn').forEach((b) => {
+      b.addEventListener('click', () => {
+        const text = b.getAttribute('data-copy') || '';
+        navigator.clipboard.writeText(text).then(() => {
+          const orig = b.textContent; b.textContent = 'copied'; b.classList.add('copied');
+          setTimeout(() => { b.textContent = orig; b.classList.remove('copied'); }, 1500);
+        });
+      });
+    });
+  }
+  document.querySelectorAll('.tab-btn').forEach((b) => b.addEventListener('click', () => renderHost(b.dataset.tab)));
+  renderHost('claude');
+
+  // Cycling host name in the Surface B install hero
+  (function () {
+    const hostEl = document.getElementById('setup-host-cycle');
+    const chips = document.querySelectorAll('#setup-host-chips .chip');
+    if (!hostEl || !chips.length) return;
+    const hosts = Array.from(chips).map((c) => c.dataset.host);
+    let i = 0;
+    setInterval(() => {
+      i = (i + 1) % hosts.length;
+      hostEl.classList.add('swap');
+      setTimeout(() => {
+        hostEl.textContent = hosts[i];
+        hostEl.classList.remove('swap');
+        chips.forEach((c) => c.classList.toggle('active', c.dataset.host === hosts[i]));
+      }, 200);
+    }, 2200);
+  })();
+</script>
+</body>
+</html>
