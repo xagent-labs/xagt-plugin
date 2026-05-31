@@ -1,0 +1,257 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 222 47% 4%;
+    --foreground: 210 40% 98%;
+
+    --card: 222 47% 6%;
+    --card-foreground: 210 40% 98%;
+
+    --popover: 222 47% 5%;
+    --popover-foreground: 210 40% 98%;
+
+    --primary: 187 100% 60%;
+    --primary-foreground: 222 47% 4%;
+
+    --secondary: 222 32% 12%;
+    --secondary-foreground: 210 40% 98%;
+
+    --muted: 222 32% 10%;
+    --muted-foreground: 215 20% 65%;
+
+    --accent: 270 95% 70%;
+    --accent-foreground: 222 47% 4%;
+
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 220 20% 14%;
+    --input: 220 20% 14%;
+    --ring: 187 100% 60%;
+
+    --success: 152 76% 56%;
+    --warning: 38 95% 60%;
+    --info: 198 93% 60%;
+    --bullish: 152 76% 56%;
+    --bearish: 0 84% 60%;
+
+    --electric: 187 100% 60%;
+    --plasma: 270 95% 70%;
+    --cyan: 178 100% 55%;
+
+    --radius: 0.625rem;
+
+    --font-sans: 'Inter', system-ui, sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+    --font-display: 'Inter', system-ui, sans-serif;
+  }
+
+  :root.light {
+    --background: 220 30% 99%;
+    --foreground: 222 47% 8%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 8%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 47% 8%;
+
+    --primary: 187 92% 36%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 220 24% 95%;
+    --secondary-foreground: 222 47% 10%;
+
+    --muted: 220 24% 96%;
+    --muted-foreground: 220 12% 42%;
+
+    --accent: 270 70% 52%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 78% 48%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 220 18% 88%;
+    --input: 220 18% 88%;
+    --ring: 187 92% 40%;
+
+    --success: 152 64% 36%;
+    --warning: 32 92% 46%;
+    --info: 198 92% 42%;
+    --bullish: 152 64% 36%;
+    --bearish: 0 78% 48%;
+
+    --electric: 187 92% 38%;
+    --plasma: 270 70% 52%;
+    --cyan: 178 86% 32%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  html, body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "ss01", "cv11", "tnum";
+  }
+  body {
+    background-image:
+      radial-gradient(circle at 20% -10%, hsl(var(--electric)/0.10), transparent 40%),
+      radial-gradient(circle at 90% 10%, hsl(var(--plasma)/0.10), transparent 40%),
+      radial-gradient(circle at 50% 100%, hsl(var(--electric)/0.06), transparent 50%);
+    background-attachment: fixed;
+  }
+  :root.light body {
+    background-image:
+      radial-gradient(circle at 20% -10%, hsl(var(--electric)/0.06), transparent 40%),
+      radial-gradient(circle at 90% 10%, hsl(var(--plasma)/0.05), transparent 40%),
+      radial-gradient(circle at 50% 100%, hsl(var(--electric)/0.04), transparent 50%);
+  }
+  ::selection {
+    background: hsl(var(--electric)/0.35);
+    color: hsl(var(--foreground));
+  }
+}
+
+@layer components {
+  .glass {
+    background: linear-gradient(180deg, hsl(var(--card)/0.6), hsl(var(--card)/0.35));
+    backdrop-filter: blur(14px) saturate(140%);
+    -webkit-backdrop-filter: blur(14px) saturate(140%);
+    border: 1px solid hsl(var(--border));
+  }
+  .glass-strong {
+    background: linear-gradient(180deg, hsl(var(--card)/0.85), hsl(var(--card)/0.6));
+    backdrop-filter: blur(20px) saturate(160%);
+    -webkit-backdrop-filter: blur(20px) saturate(160%);
+    border: 1px solid hsl(var(--border));
+  }
+  .grain {
+    position: relative;
+  }
+  .grain::after {
+    content: "";
+    position: absolute; inset: 0;
+    background-image: var(--tw-bg-noise, none);
+    opacity: 0.03;
+    pointer-events: none;
+    mix-blend-mode: overlay;
+  }
+  .gradient-text {
+    background: linear-gradient(120deg, hsl(var(--electric)), hsl(var(--plasma)) 60%, hsl(var(--cyan)));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .gradient-border {
+    position: relative;
+  }
+  .gradient-border::before {
+    content: "";
+    position: absolute; inset: 0;
+    padding: 1px;
+    border-radius: inherit;
+    background: linear-gradient(120deg, hsl(var(--electric)/0.7), hsl(var(--plasma)/0.7), transparent 60%);
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+            mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+            mask-composite: exclude;
+    pointer-events: none;
+  }
+  .grid-bg {
+    background-image:
+      linear-gradient(hsl(var(--border)/0.6) 1px, transparent 1px),
+      linear-gradient(90deg, hsl(var(--border)/0.6) 1px, transparent 1px);
+    background-size: 32px 32px;
+    background-position: -1px -1px;
+  }
+  .grid-bg-fade {
+    mask-image: radial-gradient(ellipse at center, black 35%, transparent 75%);
+    -webkit-mask-image: radial-gradient(ellipse at center, black 35%, transparent 75%);
+  }
+  .hairline {
+    background: linear-gradient(90deg, transparent, hsl(var(--border)), transparent);
+  }
+  .live-dot {
+    @apply relative inline-flex h-2 w-2 rounded-full bg-success;
+  }
+  .live-dot::after {
+    content: "";
+    position: absolute; inset: -4px;
+    border-radius: 9999px;
+    background: hsl(var(--success)/0.35);
+    animation: pulse-glow 2s ease-in-out infinite;
+  }
+  .terminal-caret::after {
+    content: "▍";
+    margin-left: 2px;
+    color: hsl(var(--electric));
+    animation: blink 1s steps(2,start) infinite;
+  }
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--border)) transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar { width: 6px; height: 6px; }
+  .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: hsl(var(--border));
+    border-radius: 9999px;
+  }
+}
+
+@layer utilities {
+  .text-balance { text-wrap: balance; }
+  .text-pretty { text-wrap: pretty; }
+  .mask-fade-b {
+    mask-image: linear-gradient(to bottom, black 70%, transparent 100%);
+    -webkit-mask-image: linear-gradient(to bottom, black 70%, transparent 100%);
+  }
+  .mask-fade-r {
+    mask-image: linear-gradient(to right, black 70%, transparent 100%);
+    -webkit-mask-image: linear-gradient(to right, black 70%, transparent 100%);
+  }
+
+  /* Fluid type scale — keeps headings readable from 320px to 4K. */
+  .text-fluid-xs   { font-size: clamp(0.7rem, 0.65rem + 0.2vw, 0.78rem); }
+  .text-fluid-sm   { font-size: clamp(0.8rem, 0.75rem + 0.25vw, 0.9rem); }
+  .text-fluid-base { font-size: clamp(0.9rem, 0.85rem + 0.3vw, 1rem); }
+  .text-fluid-lg   { font-size: clamp(1.05rem, 0.95rem + 0.45vw, 1.2rem); line-height: 1.35; }
+  .text-fluid-xl   { font-size: clamp(1.2rem, 1.05rem + 0.7vw, 1.45rem); line-height: 1.3; }
+  .text-fluid-2xl  { font-size: clamp(1.4rem, 1.15rem + 1.1vw, 1.85rem); line-height: 1.2; }
+  .text-fluid-3xl  { font-size: clamp(1.7rem, 1.3rem + 1.8vw, 2.4rem); line-height: 1.1; }
+  .text-fluid-4xl  { font-size: clamp(2rem, 1.4rem + 2.6vw, 3rem); line-height: 1.05; }
+  .text-fluid-display { font-size: clamp(2.4rem, 1.6rem + 4vw, 4.5rem); line-height: 1; }
+
+  /* Fluid spacing — for hero / shell padding. */
+  .pad-fluid-x { padding-left: clamp(1rem, 2.5vw, 2rem); padding-right: clamp(1rem, 2.5vw, 2rem); }
+  .pad-fluid-y { padding-top: clamp(1.25rem, 1rem + 1.5vw, 2.5rem); padding-bottom: clamp(1.25rem, 1rem + 1.5vw, 2.5rem); }
+
+  /* Animation respect for reduced motion. */
+  @media (prefers-reduced-motion: reduce) {
+    .animate-pulse-glow,
+    .animate-shimmer,
+    .animate-scan,
+    .animate-ticker,
+    .animate-orbit,
+    .animate-blink,
+    .animate-fade-in {
+      animation: none !important;
+    }
+  }
+
+  /* Safe-area helpers for notched / foldable devices. */
+  .pb-safe { padding-bottom: max(env(safe-area-inset-bottom), 0px); }
+  .pt-safe { padding-top: max(env(safe-area-inset-top), 0px); }
+
+  /* Horizontal-scroll container that hides scrollbar but keeps function. */
+  .scroll-x-snap {
+    scroll-snap-type: x mandatory;
+    overscroll-behavior-x: contain;
+  }
+  .scroll-x-snap > * { scroll-snap-align: start; }
+}

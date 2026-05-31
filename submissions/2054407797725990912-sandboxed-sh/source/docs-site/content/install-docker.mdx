@@ -1,0 +1,64 @@
+---
+title: Docker Install
+description: Run sandboxed.sh locally or on a server using Docker Compose
+---
+
+# Docker Install
+
+Docker is the fastest way to run sandboxed.sh locally or on a server. The Docker image bundles the backend, dashboard, and required CLIs in a single container.
+
+## Quick Start
+
+```bash
+git clone https://github.com/Th0rgal/sandboxed.sh.git
+cd sandboxed.sh
+cp .env.example .env
+# Edit .env — set DASHBOARD_PASSWORD and JWT_SECRET
+docker compose up -d
+```
+
+Open `http://localhost:3000` in your browser.
+
+## Configuration
+
+At minimum, set these in `.env`:
+
+- `DASHBOARD_PASSWORD`
+- `JWT_SECRET`
+- `DEV_MODE=false` for production
+
+Optional but common:
+
+- `LIBRARY_REMOTE` for a shared agent library
+- `MAX_PARALLEL_MISSIONS` to cap concurrency
+
+## Container Workspaces (systemd-nspawn)
+
+To enable isolated container workspaces, uncomment the privileged settings in `docker-compose.yml`:
+
+```yaml
+services:
+  sandboxed.sh:
+    privileged: true
+    cgroup: host
+```
+
+Then restart:
+
+```bash
+docker compose down && docker compose up -d
+```
+
+## Production Notes
+
+- The container exposes port **80** internally and maps it to **3000** on the host.
+- Use a reverse proxy (Caddy/Nginx) if you want TLS or a custom domain.
+- Keep `/root/.sandboxed.sh` and `/root/.claude` on persistent volumes (already in `docker-compose.yml`).
+
+## Dashboard Access
+
+The Docker image includes the dashboard. If you prefer a separate frontend, deploy `dashboard/` to Vercel and set `NEXT_PUBLIC_API_URL` to your backend URL.
+
+## Next Step
+
+Head to [First Mission](/first-mission) to run your first task.

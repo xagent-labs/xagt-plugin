@@ -1,0 +1,79 @@
+# Sandboxed.sh Scripts
+
+Small helper scripts for local development and packaging.
+
+## Available Scripts
+
+### smoke_harnesses_dev.sh
+Unified dev smoke gate for model-routing and mission streaming.
+
+Runs:
+- `proxy_smoke.py` against `/v1/models` and `/v1/chat/completions`
+- `mission_stream_smoke.py` across selected harness backends
+
+Use `--help` for all options, including backend-specific model overrides and expected model assertions.
+
+### assistant_mcp_smoke.sh
+Smoke test for the Hermes assistant MCP bridge. It checks
+`/api/system/components` for `assistant_mcp`, initializes `assistant-mcp`, calls
+`list_active_missions`, and validates the JSON-RPC responses. Use
+`--require-hermes-runtime` after installing the external Hermes service.
+
+Example:
+- `scripts/assistant_mcp_smoke.sh --base-url https://agent-backend-dev.thomas.md`
+- `scripts/assistant_mcp_smoke.sh --base-url https://agent-backend-dev.thomas.md --require-hermes-runtime`
+
+The second command is the cutover gate. It should fail until
+`hermes-assistant-dev.service` is installed, active, and reported as
+`hermes_assistant` with status `ok` from `/api/system/components`.
+
+### harness_contract_tests.sh
+Runs a curated set of fast cross-harness contract tests that guard event-conversion invariants and OpenCode SSE parsing behavior.
+Used by CI job `harness-contract`.
+
+### proxy_smoke.py
+Smoke test for the OpenAI-compatible proxy routes:
+- `GET /v1/models`
+- `POST /v1/chat/completions` (streaming, and optional non-streaming)
+
+### mission_stream_smoke.py
+Mission API streaming smoke test across harnesses (`claudecode`, `opencode`, `codex` by default).
+
+Validates:
+- streaming thinking/text/tool events
+- queued-message behavior
+- assistant model metadata (with optional per-backend expectations)
+
+For history loading changes, run this against the dev deployment and then
+inspect the created mission with `/api/control/missions/:id/snapshot` and
+`/events?view=history`: the snapshot should contain the first-paint payload and
+`/events` should handle pagination and delta catch-up.
+
+### install_desktop.sh
+Installs desktop automation dependencies on the host (used by the desktop MCP).
+
+### generate_ios_icons.js
+Generates iOS app icons for the SwiftUI dashboard.
+
+### setup_android_release_secrets.sh
+Generates an Android release signing keystore, stores a local backup under
+`android_dashboard/keys/`, and uploads the matching GitHub Actions secrets with
+`gh secret set`.
+
+### validate_skill_isolation.sh
+Validates strong workspace skill isolation on the server (checks OpenCode env, global skill dirs, and latest mission skills).
+
+### mission_debug_bundle.sh
+Collects a mission-focused diagnostic bundle from control API endpoints (mission snapshot, events, tree, automations, progress, OpenCode diagnostics) and outputs a `.tar.gz` archive for triage.
+
+### telegram_user_smoke.py
+Authenticates a real Telegram user account via Telethon and helps test a bot from
+the client side.
+
+Setup:
+- Create API credentials on `https://my.telegram.org`
+- Export `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, and `TELEGRAM_PHONE`
+- Install Telethon: `python3 -m pip install telethon`
+
+Example:
+- `python3 scripts/telegram_user_smoke.py --chat -1001730152948 --send "@ana_lfgbot ping" --print-history`

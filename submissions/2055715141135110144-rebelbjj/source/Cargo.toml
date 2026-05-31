@@ -1,0 +1,44 @@
+[package]
+name = "phantom-mat-pass-vercel-api"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "phantom_mat_pass_api"
+path = "rust-api/lib.rs"
+
+[dependencies]
+axum = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+tokio = { version = "1", features = ["full"] }
+tower = "0.5"
+uuid = { version = "1", features = ["v4", "serde"] }
+vercel_runtime = { version = "2", features = ["axum"] }
+
+[[bin]]
+name = "health"
+path = "api/health.rs"
+
+[[bin]]
+name = "training_session_proof"
+path = "api/training/session-proof.rs"
+
+[[bin]]
+name = "training_request_verification"
+path = "api/training/request-verification.rs"
+
+[[bin]]
+name = "coach_verify_session"
+path = "api/coach/verify-session.rs"
+
+[[bin]]
+name = "verifications"
+path = "api/verifications.rs"
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+opt-level = 3

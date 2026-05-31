@@ -1,0 +1,216 @@
+# Agentic Wallet Ops Center: 48–72 hour winning strategy
+
+## 1. Competitive map
+
+| Category | Representative products | What users hire them for | Strengths | Weaknesses | Where we credibly differentiate in 48–72h |
+|---|---|---|---|---|---|
+| **agentic-terminal** | Coinbase AgentKit + CDP Agentic Wallets (Feb 2026 launch, skills + spend permissions); Wayfinder Shells ($PROMPT, runs natural-language tx across HyperliquidEVM/ETH/Base); Almanak (18-agent DeFi swarm, TEE execution); aixbt by Virtuals (autonomous KOL, ~$200M cap); ElizaOS / auto.fun (TS framework, "Marc AIndreessen" on Solana) | "Give my LLM a wallet and let it act on-chain" | Distribution, model-agnostic, deep skill libraries, free SDKs | None of them ship a **decision-provenance artifact** — they ship execution. AgentKit guardrails are spend caps + KYT, not "prove the reasoning passed every gate." Almanak ran TEE for inference, not for the proof chain. | We ship the missing layer: a tamper-evident, hash-chained, signed Black Box that says *which gates fired in what order and why this trade passed*. Coinbase, Wayfinder, Almanak all log outcomes — we log **adjudicated intent**. |
+| **token-scanner** | DexScreener (default DEX index; Conor Grogan publicly called it "promoted bundled scams" Jan 2025); Birdeye; GMGN.ai (2.1/5 Trustpilot, recurring drainer-clone alerts); Photon; BullX NEO; Axiom Trade | "Find a token before everyone else; sometimes click to buy" | Latency, depth of Solana coverage, free or sub-1% fees | Hostile environment for serious capital: GMGN private-key drains, BullX hidden fees ("port went from .2 to .12 after selling"), Banana Gun $3M exploit, Unibot $600K Call Injection | We don't compete here. We **consume** the scanner layer (via okx-dex-trenches + okx-dex-token + okx-dex-signal) and impose an audit perimeter the scanners actively refuse to. Pitch: scanners are a feed; we are the **operating discipline around the feed**. |
+| **wallet-policy** | Safe + Zodiac Roles Modifier v2 (on-chain RBAC, target+selector+param conditions); Turnkey JSON policy in Nitro enclave; Privy session signers in TEE; Fireblocks TAP (server-side first-match-wins); ZeroDev Kernel composable permissions (CallPolicy/RatePolicy/TimePolicy on-chain); Coinbase Spend Permissions (must be set at SA creation) | "Conditionally authorize a signer based on amount, recipient, contract, time" | High expressiveness for **static** invariants; battle-tested verifiers in TEE or on-chain | All of them enforce *what is allowed*, none of them enforce *whether what was proposed matches operator intent right now*. The Freysa $47K loss happened **inside** an unimpeachable TEE — TEEs don't catch prompt injection of application logic. | We sit one layer above policy: we attest that **the agent's full decision pipeline (radar → risk → allocator → executor) passed in correct sequence, with required artifacts (quote, simulation, confirmation, trace integrity) attached and hash-chained**. Static policy says "allowed"; we say "allowed *and* arrived here by the right path." |
+| **copy-trade** | Hyperliquid Vaults (AceVault Hyper01 $14M TVL, 127% APR; the 50x insider blew up $22M in Mar 2025); Bitget Copy Trade; GMGN/BullX/Trojan copy modes; Nansen Smart Money feed ($99–$1,899/mo) | "Mirror a wallet I trust without thinking" | Live execution, leaderboards, cheap | Front-running of vault state, leader blowups, label lag ("entity attribution is a living problem" — Nansen) | We treat smart-money signals as **input to a gated pipeline**, not as a one-click follow. The Black Box answers "why did *my agent* take this signal seriously?" |
+| **risk-terminal** | Bloomberg AIM (pre-trade compliance, 500+ rule templates, block-with-reason); Bloomberg EMSX (Exane FIX algo-state feedback on the blotter); Talos (TMI model, slippage-vs-arrival markouts); FalconX 360 (cross-venue portfolio margin Feb 2026 Hyperliquid integration); Anchorage Governance (HSM "no blind signing", quorum biometric); Fireblocks Console TAP rows | "Prove every trade was authorized and explain why if questioned" | 25+ years of refined pre-trade compliance UX, immutable archives (Bloomberg Vault), decoded-intent + signature stamps (Anchorage) | None of them exist for agent-originated DeFi tx. Talos Head of Quant Execution Eliad Hoch publicly admits "institutional crypto traders managing billions face a critical blind spot: they can't accurately predict execution costs before trading." | We **port the institutional approval UX** (Anchorage decoded-intent card + Fireblocks TAP row + AIM block-with-reason + BitGo lifecycle cards) to the agent-originated tx use case. This is direct UX transfer that nobody in crypto-agent land has done. |
+| **signing-infra** | Lit Protocol PKPs + Lit Actions (arbitrary JS conditional signing inside TEE); Coinbase cb-mpc + Nitro enclave; OKX Agentic Wallet TEE custody; Fireblocks MPC + SGX | "Hold the key, sign only when conditions met" | TEE custody, threshold signatures, attested execution | Conditions are still expression-level, not pipeline-level. Lit Actions are arbitrary JS but no canonical "decision provenance" pattern. | OKX already provides the TEE/signing primitive. We compose **on top of it** with a verifier that the wallet (or a future Lit Action) can require an attested Black Box hash before signing. Designed to graduate into a Lit Action / Safe Guard later. |
+| **simulation-or-guardian** | Tenderly Simulator (asset deltas, state diffs, alerts API); Blockaid (in MetaMask/Phantom/Coinbase by default); GoPlus Security (34M API calls/day); Pocket Universe (effectively defunct post-Kerberus acquisition 2025); Wallet Guard (defunct); Harpie (shut down Mar 27, 2025); Forta Firewall | "Tell a human in a modal whether to click Confirm" | Detect drainers, honeypots, address poisoning at sign time | All optimized for **a human reading a modal**. An agent calling Uniswap legitimately for the wrong economic reason after prompt injection is **not flagged**. The B-category category has lost three players in 12 months. | We're not building another guardian for humans. We're building a **machine-readable adjudication layer for agents**, gated on simulation evidence we pull from `okx-onchain-gateway` and risk evidence from `okx-security`. |
+
+## 2. Pain-point taxonomy
+
+**Discovery pain.** GMGN's own Jan 9 2025 tweet warned: *"DO NOT install the fake 'GMGN' app... your wallet will be drained."* Uwuu.ai's review documents **2–5 second copy-trade latency translating to 10–30% worse fill prices**; copy-traders routinely become exit liquidity. Conor Grogan (Coinbase Head of Product Ops, Jan 2025): *"I don't think I've ever seen such a widely used website steer into dark patterns like Dexscreener has. Nearly the entire front page is promoted bundled scams."* These pains are **upstream of signing** — they argue for treating any scanner feed as untrusted input and forcing it through a verifier before any agent acts on it.
+
+**Trust/safety pain.** Freysa (Nov 22 2024): attacker `p0pular.eth` jailbroke an agent into calling `approveTransfer` for "incoming" funds, drained **13.19 ETH / $47K** on attempt #482. AIXBT (Mar 18 2025): dashboard compromise queued two malicious replies, agent transferred **55.5 ETH / $106K**; founder publicly admitted *"hard learned lesson about automating high value txns."* BasisOS on Virtuals (Nov 25 2025): **$531K** drained via wrapper code "successfully mimicking automated behavior since early November" — first recorded AI-agent fraud. ElizaOS memory-injection attack (Princeton/Sentient, arXiv 2503.16248): *"the threat is not random behavior — it's precision corruption. Even an admin command like transfer() can be hijacked to send assets to an attacker, based solely on forged memory context."* **All four would have been caught or instantly forensic by a signed pipeline trace** showing the agent's authorization path, because the policy/intent boundary was the failure surface in every case.
+
+**Execution pain.** Solana sandwich extraction: **$370M–$500M over 16 months** per sandwiched.me, including one $8.9M WIF order filled 1,400% above market for a **92% loss**. Jito tip arms race burned **$9.3M in SOL tips in one week** just to avoid sandwiches. Banana Gun (Sept 19 2024): **563 ETH / $3M** stolen from 11 users via Telegram oracle flaw. Unibot (Oct 31 2023): **$600K+** via Call Injection on approvals. Maestro $200K silent loss with Maestro publicly claiming *"We haven't received 1 single complaint."* A signed pre-trade trace including quote and slippage cap **converts each of these from disputed user complaints into auditable evidence**.
+
+**Risk-management pain.** AIXBT itself posted *"ngmi. got baited into sending 55.50 eth"* — no human-in-loop check on a $100K transfer. Hyperliquid 50x insider wallet drained **~$22M** in March 2025; vault copy-traders had no risk envelope. BasisOS Virtuals announcement (Nov 2025): *"The Agentic FoF has been compromised due to a security breach, exposing approximately 531k. All vaults are currently paused, and withdrawals for the Agentic FoF are suspended."* Wasabi Protocol drained **$5.5M** across four chains in May 2026, forcing Virtuals to freeze margin deposits. **The fix is per-action evidence that risk gates ran and what they returned, not after-the-fact pause buttons.**
+
+**Audit/compliance pain.** Talos Head of Quant Execution publicly admits crypto traders "are essentially flying blind" on pre-trade cost estimation. Virtuals markets *"agents must log their decisions onchain for transparency"* — yet BasisOS still rugged $531K because the signing layer didn't enforce that claim. BullX Trustpilot pattern: *"trades getting stuck, withdrawals freezing, or funds disappearing — often with no response from support."* The operator cannot answer *"why did your agent sell at X?"* because no current product produces a tamper-evident chain from intent → simulation → decision → signature. **This is exactly the gap an immutable signed event trace closes.**
+
+**UX/operator pain.** Photon withdrawal complaints aggregated on Reddit: *"Awful support."* GMGN Trustpilot: *"They send all my solana from the telegram bot wallet to another wallet without my confirmation guys."* BullX Reddit phishing pattern via fake Telegram clones. Maestro silently lost $200K and denied it. The operator-facing failure is **not knowing what the agent did or being unable to prove it after the fact**. Anchorage's marketing copy directly addresses this from the institutional side: *"Gain a comprehensive view of every authorization with no blind signing."* Crypto-native agents have no equivalent.
+
+## 3. Wedge analysis
+
+**The wedge in one line.** A verifiable adjudication layer between an agent's proposed transaction and a wallet's signature, producing a hash-chained, signed Black Box that proves the proposal passed policy, risk, sizing, quote freshness, user confirmation, and trace-integrity gates **in the correct order** before execution — defaulting to simulated/testnet, with mainnet caps off by default.
+
+**Why this fits the existing repo.** We already have the Opportunity Radar feeding from four OKX skills (signal, token, trenches, swap), five live agent seats, append-only JSONL with `prev_event_hash` / `event_hash` / `session_hash`, a tamper-demo script, a JSON policy schema, and a Mission Control UI with replay. The sprint moves the verifier from client to server and makes the policy schema the single source of truth across scanner and verifier. That is precisely the wedge — finishing the cryptographic discipline of an already-shaped product.
+
+**Why it is not just another token scanner.** DexScreener, Birdeye, GMGN, Photon, BullX have already won execution latency and feed coverage; we cannot beat them in 72 hours and they are operating in what Coinbase's own Head of Product Ops calls a "dark patterns" environment. We do not produce signals; we **adjudicate the agent's response to signals from those scanners**. The Black Box's job is to make scanner output safe for autonomous consumption.
+
+**Why it is not just another wallet dashboard.** Zerion / DeBank / Rabby answer "what do I own and what just happened to it?" — they look backward at on-chain state. We answer "what is the agent about to do, what gates did it pass, and can I prove that later?" — we look at the **decision pipeline that produced the signature**, before broadcast. Dashboards have no notion of decision provenance because they consume the public ledger; we produce a private/permissioned artifact the public ledger doesn't carry.
+
+**Why it is not just a Safe module.** Safe Allowance, Zodiac Roles v2, Cobo Safe Guard, ZeroDev Kernel, Turnkey JSON, Fireblocks TAP all enforce *static* predicates (target, selector, ABI-decoded params, rate limits, designated signers). They cannot encode *"this trade only makes sense if the radar's smart-money signal is fresh, the simulator returned acceptable slippage, the risk officer didn't veto, and the human confirmed in that order."* That is a **pipeline invariant**, not a transaction invariant. An agentic-provenance layer adds: (1) ordering enforcement across multiple agents/gates, (2) evidence attachment (quote, simulation, sim hash), (3) tamper-evident chain that downstream contracts/signers can require as input. Safe modules can later **consume** our adjudication hash as a precondition; we and Safe are complementary, not substitutes.
+
+**Why it could become a real company — 12-month roadmap.**
+- M0 (hackathon): Mission Control demo with server-verified Black Box on OKX skills + X Layer deployment.
+- M1 (months 1–2): Adjudication SDK + REST API consumable by any agent framework (ElizaOS, AgentKit, Wayfinder, Olas Pearl). Sells *infrastructure to existing agent companies* rather than yet another agent.
+- M2 (months 3–4): Lit Action / Safe Guard module that **refuses to sign** unless a valid Black Box hash signed by an approved adjudicator key is supplied. Composes with Coinbase Spend Permissions, ZeroDev Kernel, Safe Roles.
+- M3 (months 5–7): Multi-operator quorum approval (Anchorage-style) on top of the Black Box; biometric mobile sign-off for human-required tx. Direct sales to crypto-native funds, DAO treasuries, prop desks running Hyperliquid copy strategies.
+- M4 (months 8–12): EigenLayer AVS variant so the adjudicator itself is verifiable (random verification + slashing), removing operator trust in our service. Bundle with TRM/Chainalysis/Elliptic pre-trade screening as a regulated offering. Charge per adjudication or by basis points of routed agent volume.
+
+## 4. Product narrative
+
+**Investor pitch (one sentence).** Every serious incident in agent-driven trading — Freysa, AIXBT, BasisOS, ElizaOS memory injection, Banana Gun — failed at the boundary between agent decision and wallet signature, and we are building the verifiable adjudication layer that makes that boundary auditable and refusable.
+
+**Judge pitch (one sentence, assumes ten agent demos already seen).** You've watched ten agents propose trades today; we're the only project that lets OKX Agentic Wallet refuse to sign one of them and prove why in a tamper-evident artifact you can replay frame-by-frame.
+
+**30-second demo (click-by-click).**
+1. **0:00–0:04** Mission Control loads on X Layer. Opportunity Radar is already streaming three live tickets pulled from `okx-dex-signal` + `okx-dex-trenches` + `okx-dex-token`. Each ticket shows the proposed action and a policy verdict badge.
+2. **0:04–0:10** Click the top ticket. A Fireblocks-style row expands: `Scout → Risk Officer → Allocator → Executor`, each stage marked ✓ with the artifact it produced (signal id, risk score, sizing, quote from `okx-dex-swap`). Confirmation toggle required.
+3. **0:10–0:18** Click Confirm. **The button does not fabricate an event** — the UI shows a server round-trip ("verifying..."), then renders the Black Box: a hash-chained list with `session_hash`, each `event_hash` linked to its `prev_event_hash`, and a green "trace integrity ✓" stamp signed by the server.
+4. **0:18–0:25** Click **Tamper**. The script rewrites one event. The verifier reruns live; integrity stamp turns red, the executor row turns red, the badge flips to BLOCKED. Hash mismatches are highlighted in the chain.
+5. **0:25–0:30** Restore. Green again. Cut to title card: *"Default is simulated. Mainnet signing is off. The verifier is the product."*
+
+The moment that proves the central claim is the **red flip on tamper**, because it visibly demonstrates that the wallet is gated on cryptographic discipline, not vibes.
+
+**90-second demo (extended).**
+- **0:00–0:10** Cold open: a 4-quote montage on screen — Freysa's $47K, AIXBT's 55 ETH, BasisOS's $531K, Talos's "flying blind" admission. Voiceover: *"Every one of these failed at the signing boundary. None of them had a verifiable trace."*
+- **0:10–0:25** Mission Control loads. Radar shows live tickets from `okx-dex-signal` (smart-money), `okx-dex-token` (hot tape), `okx-dex-trenches` (new launches). One ticket is annotated `policy:blocked` because its proposed slippage exceeds the cap — proves scanner-verifier parity. Click that ticket; modal explains *which* policy rule fired (Fireblocks-style row).
+- **0:25–0:45** Click an allowed ticket. Show the agent-by-agent timeline: Scout artifact (signal id + freshness ms) → Risk Officer artifact (risk score + veto flag = false) → Allocator artifact (position size + max position pct) → quote artifact (route via `okx-dex-swap`, slippage bps within cap). Each event shows decoded human-readable intent (Anchorage pattern). Confirmation toggle. Click Confirm. UI calls server `127.0.0.1:4181/verify` → server replays the event chain in order, checks veto-final semantics, checks confirmation precedes execution, signs the `session_hash`, returns the artifact.
+- **0:45–1:05** Black Box opens. Not a `<pre>` dump — a vertical timeline with each event as a card: type, timestamp, agent, `prev_event_hash` → `event_hash`, decoded payload, simulator delta if attached. Top of modal: server signature over `session_hash`. Bottom: "Replay" button steps frame-by-frame.
+- **1:05–1:20** Press **Tamper**. Demo script rewrites `risk.approved` payload in place. Verifier reruns: hash mismatch at event 4, all downstream cards turn red, "Executor may proceed" toggles to "BLOCKED: integrity verification failed." Reporter digest pulls the failure into the OKX evidence panel.
+- **1:20–1:30** Restore, integrity green. Voiceover: *"Six OKX skills wired in: signal, token, trenches, swap, security, onchain-gateway, audit-log. Default execution is simulated on X Layer. Mainnet caps are off and require explicit opt-in not enabled in this demo. The Black Box is the product."* End on the artifact, not the chart.
+
+## 5. Feature recommendations
+
+Owner key: **CC** = Claude Code (product, UX copy, policy schema, judge-facing artifacts, demo script, threat-model writeup); **Cx** = Codex (server, verifier, hashing, tests, OKX SDK integration, build/deploy).
+
+### Must ship before submission
+
+| Feature | User value | Complexity | Demo impact | Owner |
+|---|---|---|---|---|
+| **Server-side `execution.signed_or_simulated` event creation, with browser unable to write to the trace** | Closes the #1 review-finding bug; makes the central claim defensible | Medium | High — judges will probe this | Cx |
+| **Ordered/veto-final verifier with sequence-aware semantics (`risk.veto` is terminal; `execution` cannot precede `user.confirmed`)** | Closes review-finding #2; prevents "later event overrides earlier veto" trick | Medium | High | Cx |
+| **Single shared policy module imported by both scanner and verifier; scanner cannot label `policy:allowed` for slippage that exceeds the cap** | Closes review-finding #3; eliminates the most embarrassing demo failure mode | Low | Medium | Cx |
+| **Server signs `session_hash` with a stable demo key; signature shown in Black Box modal** | Anchors the "tamper-evident" claim cryptographically, not just by hashing | Low | High | Cx |
+| **Tamper demo runs from a UI button (not just CLI), produces visible red propagation** | The single moment that proves the claim on stage | Low | **Highest** — this is the cut to remember | CC + Cx |
+| **Redesigned Black Box modal: timeline cards with decoded payload, prev/next hash, sim delta, signature stamp (no raw `<pre>`)** | Borrowed Anchorage + Fireblocks + BitGo UX language; judges will recognize it | Medium | High | CC |
+| **Policy console gated: cannot disable `required_user_confirmation` or `required_trace_integrity` from same screen that says "Executor may proceed" — disabling triggers a confirmation dialog and a banner in Mission Control** | Closes the "policy console is a footgun" pain | Low | Medium | CC |
+| **Narrow execution-mode claim everywhere in UI and copy: "Simulated on X Layer testnet. Mainnet signing requires explicit cap > 0, off by default."** | Defuses any judge skepticism about real-funds risk | Low | Medium | CC |
+| **Fix `loading-forever` states with explicit timeouts + retry; failure UI for each (wallet logged out, OKX rate-limit hit, scan returns zero, integrity fails)** | Removes the most common demo-killer | Low | Medium | Cx |
+| **Reporter digest pulls failures (verifier rejects, integrity fails) into a "Last 5 events" panel with timestamps** | Auditability story has a tangible artifact | Low | Medium | CC |
+| **Add `okx-security` skill call before each simulated execution; attach result hash into the trace as `risk.security_check` event** | Bumps OKX surface count from 4 to 5 skills; aligns with judges' safety narrative | Low–Medium | Medium | Cx |
+| **Add `okx-onchain-gateway` simulation result hash as `quote.simulation` event in the chain** | Bumps to 6 skills; converts simulation into trace evidence, not just a popup | Medium | Medium | Cx |
+| **Deploy at least the demo session-hash signer to X Layer; record at least one on-chain commitment of a `session_hash` per demo run** | Triggers "Most Active Agent" prize eligibility; ties product to X Layer Phase-1 narrative | Medium | High | Cx |
+
+### Should ship if time allows
+
+| Feature | User value | Complexity | Demo impact | Owner |
+|---|---|---|---|---|
+| **`okx-audit-log` skill integration to export the Black Box JSONL via the OKX-native audit surface** | Direct alignment with Onchain OS's own audit skill; judges see we used the canonical surface | Medium | Medium | Cx |
+| **Live `okx-dex-ws` WebSocket subscription replacing one of the polled scanner calls** | Live demo wow-factor; matches OKX's "real-time" positioning | Medium | High | Cx |
+| **Two-tier policy mode (`autonomous` vs `2-tier-approval`) with the X-of-Y badge on the ticket, even if 1-of-1 in demo** | Borrows Fireblocks/Anchorage pattern; tells the company story without building MPC | Medium | Medium | CC |
+| **A "Replay" stepper inside Black Box that lets a viewer play through events one at a time** | Bloomberg EMSX algo-state-feedback analog; sells the audit story | Low | Medium | CC |
+| **1–3 minute demo video uploaded ahead of submission, hosted on X for "Most Popular" prize signal** | Build X 2026 special prize criterion | Low | Medium | CC |
+| **Threat-model README enumerating which Part-2 incidents (Freysa, AIXBT, BasisOS, Banana Gun, ElizaOS memory injection) the Black Box would have caught and how** | Closes the judge's "but what does this actually prevent" question on paper | Low | Medium | CC |
+| **Sign the session hash with a TEE-attested key by routing through OKX Agentic Wallet's own signing primitive instead of a demo key** | Goes from "we say it's signed" to "OKX TEE says it's signed"; aligns with OKX's stated moat | High | High | Cx (only if M1–M4 finished by hour 36) |
+
+### Explicitly cut
+
+| Feature | One-line cut rationale |
+|---|---|
+| **Yield Manager agent seat (currently stubbed)** | Six seats is a vanity number; cut the stub or judges will ask about it and the answer is "not done." Five live, real seats > six framed seats. |
+| **Mainnet signing of any kind, even guarded by caps** | One slip and the whole "default-safe" narrative dies on stage; sprint does not add mainnet, period. |
+| **Multi-chain support beyond X Layer + one EVM testnet** | Build X requires X Layer deployment for the X Layer Arena prize; spreading thin loses the "Most Active Agent" prize. |
+| **AI-generated policy suggestions ("the agent will draft your policy")** | Re-introduces the exact failure mode (model rewriting its own gate) the product exists to prevent. |
+| **A native chat UI / chatbox for the agent** | Every demo today has a chatbox; the judge has seen ten. Our differentiator is the artifact, not the chat. |
+| **EigenLayer AVS or zkML integration** | Right product, wrong sprint. Roadmap M4. Mentioning it in narrative is fine; building it loses 24 hours. |
+| **Real-time MEV protection / Jito-style bundle routing** | Out of scope, requires mainnet, won't move judge needle vs. tamper-demo. |
+| **Telegram bot front-end** | Banana Gun and Unibot have poisoned this surface; we are the **anti-Telegram-bot** narrative. |
+| **Copy-trading any specific wallet from Nansen Smart Money / Hyperliquid leaderboard** | Drags us into the copy-trade category we explicitly do not want to be in. Smart-money signal stays as input only. |
+| **Wallet drainer / phishing detection (overlap with Blockaid/GoPlus)** | The B-category is dying (Harpie shut Mar 2025, Pocket Universe diminished, Wallet Guard sunset); we are not entering it. |
+| **An "explain the trade in plain English" GPT call at execution time** | Hebbia/AlphaSense/Bloomberg ASKB own this UX; if we do it badly judges will compare. Our explanation is the structured trace, not paragraphs. |
+| **Token launchpad / our own meme agent / Virtuals-style bonding curve** | Sector consensus by mid-2025 is that this category is glorified chatbots; Virtuals down ~80% from peak; CZ specifically called out "focus on utility instead of launching tokens." |
+| **Six skills used as decorative API calls without trace integration** | "OKX integration" is 15% of last published rubric and AI judges read code; decorative calls will be detected. Every skill call must produce a `prev_event_hash`-linked trace event. |
+
+## 6. UX recommendations
+
+**First 10 seconds on the page.** Open straight into Mission Control with three live tickets already streaming, a green `policy_version: v0.3` chip in the header, and a single "Default: Simulated on X Layer" banner. **No splash screen, no chatbox.** Top right shows `session_hash` (first 8 chars) and a small green integrity stamp. Mental model conveyed before the user clicks anything: *this is a desk, not a toy*. Steal the Bloomberg-blotter density: information-rich, deliberately unfriendly to "vibe-only" agent demos.
+
+**Opportunity review flow.** Each ticket row uses Fireblocks-TAP column structure exactly: `agent | source signal | proposed action | asset | size | slippage | policy verdict`. Click expands to a vertical strip (BitGo lifecycle pattern): `Scout → Risk Officer → Allocator → quote (okx-dex-swap) → user.confirmed → execution`. Each stage is a card with the artifact attached (signal id, risk score JSON, allocation pct, route hash). Greyed stages haven't run yet. Red on veto. **No stage card can be skipped or reordered in the UI** — visual reinforcement of veto-final ordered semantics.
+
+**Trust and trace visualization.** Replace the raw `<pre>` Black Box with a vertical event timeline borrowing Anchorage's "no blind signing" pattern: each event is a card with **decoded human-readable header** ("Risk Officer approved trade 7af3..."), an **expandable raw JSON** below, and a hash strip at the bottom showing `prev_event_hash[..8] → event_hash[..8]`. A vertical line connects the hashes. At the top of the modal: `session_hash` + server signature pill ("Signed by adjudicator key 0xC1A..."). Replay control at the top — Step / Play / Pause. **Tamper button is in the modal, labelled "Demonstrate tamper" with a tooltip explaining what will happen.** When pressed, the affected card and every downstream card flash red with a hash-mismatch icon and a one-line `expected ≠ got` diff. Restore button next to it. This is the artifact a judge will photograph.
+
+**Policy console.** Today the same screen shows the toggle for `required_user_confirmation` and a status box reading "Executor may proceed" — a footgun. Fix: split into two columns. Left = **immutable policy** (chain allowlist, max position pct, slippage cap, real-funds cap = 0, signing mode = simulated). Right = **operator controls** (signing mode dropdown, real-funds cap input, confirmation toggle, integrity toggle). Disabling either of the last two opens a modal: *"You are disabling a safety gate. Mission Control will display a red banner and the next 10 trace events will record this change with your operator identity."* Status box ("Executor may proceed") moves to a different screen so it cannot share visual context with the disable controls. Borrow Bloomberg AIM's policy version chip + audit history — every policy edit is a trace event itself.
+
+**Confirmation/signing moment.** Today: one button, fabricates client-side. Future: button enters a three-beat state — **Verifying** (server replaying the chain, ~400ms with a deliberate "thinking" animation showing each gate flash green), **Signing** (server commits `session_hash` and signs), **Sealed** (Black Box artifact slides in). Make the wait deliberate, not hidden — *the wait is the product*. Each beat surfaces the artifact being produced (gate-pass log → signed hash → JSONL chain). Borrow Anchorage's biometric stamp UI (even if our "biometric" is just a hardcoded operator key for the demo, the visual establishes the company story).
+
+**Failure and fallback states.** Wallet logged out → top-banner red strip, "Reconnect" button, Mission Control still shows last-known radar (read-only). OKX skill rate-limit hit → ticket row shows `quote: stale (rate-limited, retrying 12s)` with a countdown; verifier records `quote.stale` event in trace and refuses to allow execution. Scan returns zero opportunities → empty-state card with the last scan timestamp and a "Force rescan" button (calls `127.0.0.1:4181`); the empty state is **not** an error — it's a feature ("policy held; no actionable signals"). Integrity verification fails → full-screen takeover modal: hash mismatch position, expected vs got, "this is the kind of failure the Black Box is built to surface" copy with one-click export of the broken JSONL for review. **Never silently retry an integrity failure; always escalate.**
+
+## 7. Implementation sprint recommendation
+
+The current spine (server-side gate enforcement, ordered/veto-final verifier, scanner-policy parity, narrow execution-mode claims, fix loading-forever, sign the session hash) is **correct and should not be overridden**. Research confirms it directly: every named incident (Freysa, AIXBT, BasisOS, Banana Gun, ElizaOS memory injection) is a failure at one of those three structural bugs. The additions below extend the spine without diverting it.
+
+### Milestone 1 — Hour 0–8: Cut the spine
+
+- **Goal.** Lock the threat model and policy schema as the single source of truth; produce a one-page README naming what we will and will not prevent.
+- **Hard review gate.** A markdown file `docs/black-box-spec.md` exists that defines: event types, ordered semantics, veto-finality, what counts as `policy:allowed`, simulated-vs-mainnet contract, signature scheme over `session_hash`. The schema file `policy.v0.3.json` is referenced from both scanner and verifier source. **Pass = scanner and verifier import the same module; fail = two copies.**
+- **Claude Code reviews.** That the threat-model README maps each of the five named incidents (Freysa, AIXBT, BasisOS, Banana Gun, ElizaOS memory injection) to a specific gate the Black Box enforces. Reject if any incident has no mapped gate.
+- **Codex implements/verifies.** Single `policy/` package; imports verified via `grep` for duplicate cap constants. Unit test: scanner and verifier reach the same verdict on 20 fixture orders including 5 boundary cases (slippage exactly at cap, exactly above, exactly below).
+
+### Milestone 2 — Hour 8–20: Verifier moves server-side
+
+- **Goal.** Browser cannot write `execution.signed_or_simulated`. All trace writes go through `127.0.0.1:4181`.
+- **Hard review gate.** With browser dev tools open and the local server stopped, no UI action can produce a new trace event. With the server up, the UI can only request a write; the server validates ordering + veto-finality + confirmation-precedes-execution + scanner verdict matches verifier verdict, and either appends or rejects. **Pass = a chaos test that forges 10 client-side writes is rejected 10/10; fail = any forged write lands.**
+- **Claude Code reviews.** That the "Executor may proceed" UI text is only rendered when the server response carries a fresh adjudicator signature, not on optimistic UI state. That copy never overclaims ("Signed" vs "Simulated and sealed").
+- **Codex implements/verifies.** Server endpoint `POST /events` with ordering + veto-final + confirmation precedence checks, signed response, append to JSONL, return the new event hash. Test suite includes: late `risk.veto`, `execution` before `user.confirmed`, duplicate `event_hash`, replay of an old `session_hash`. All four must reject.
+
+### Milestone 3 — Hour 20–32: Black Box modal rebuild + tamper UX
+
+- **Goal.** Replace the raw `<pre>` with the timeline-card design; ship the in-UI tamper button.
+- **Hard review gate.** Live demo: open Black Box, tamper, see red propagation visibly within one second, restore, see green. No console-only steps. **Pass = a non-engineer (the human reviewer) runs the tamper demo unaided in under 30 seconds; fail = they need instruction.**
+- **Claude Code reviews.** Every card has decoded human-readable header above raw JSON (Anchorage pattern). Hash strip is visible, not buried in JSON. The session-hash signature pill is at the top of the modal and renders the signer key fingerprint. Failure UI uses red + clear diff, never silent.
+- **Codex implements/verifies.** Tamper script as an internal API (`POST /demo/tamper?eventIndex=N`) producing a deterministic mutation; verifier `GET /verify` returns mismatch position + `expected` + `got`. Cypress/Playwright test scripts the full Mission-Control → ticket → confirm → tamper → restore loop.
+
+### Milestone 4 — Hour 32–44: Scanner-policy parity + extra OKX skills
+
+- **Goal.** No `policy:allowed` ticket can violate the cap. Trace gains evidence events from `okx-security` and `okx-onchain-gateway`.
+- **Hard review gate.** Property test (~1,000 random orders generated near boundaries): scanner's verdict equals verifier's verdict 1,000/1,000. Every executed ticket's trace contains at least one `risk.security_check` event and one `quote.simulation` event linked into the hash chain. **Pass = property test green + grep of recent JSONL traces shows both event types in every successful execution; fail = either condition not met.**
+- **Claude Code reviews.** Skill calls are not decorative — each skill call's response hash is bound into the trace's `prev_event_hash` chain, not just rendered as a panel. The OKX evidence panel cites the skill name on each card.
+- **Codex implements/verifies.** Property test using fast-check or hypothesis-style; CI gate fails build on mismatch. Skill SDK adapter under `skills/okx/` with retry + timeout + rate-limit error surface that produces `quote.stale` trace events instead of silently failing.
+
+### Milestone 5 — Hour 44–56: Policy console split + signing-moment polish + failure UI
+
+- **Goal.** Operator cannot disable safety gates without a confirmation flow and an audit event. All failure paths render an explicit state, never a permanent spinner.
+- **Hard review gate.** Manual checklist run in front of the reviewer: (a) try to disable `required_user_confirmation`, see modal, accept, see red banner persist + new policy-edit trace event with operator id; (b) kill the OKX skill server, see rate-limit/stale event in trace + countdown UI; (c) force an integrity failure, see takeover modal with hash diff. **Pass = all three observed; fail = any silent state.**
+- **Claude Code reviews.** Copy on the gating modal does not blame the operator; it explains the consequence. The "Sealed" beat in the signing animation matches the artifact actually produced. Empty-state and rate-limit copy are differentiated.
+- **Codex implements/verifies.** Timeouts on every fetch; abort-controller wiring; UI tests for the three failure states; banner state persists across reloads via the trace, not via localStorage.
+
+### Milestone 6 — Hour 56–64: X Layer deployment + on-chain commitment per session
+
+- **Goal.** Eligible for "Most Active Agent" prize: at least one on-chain X Layer commitment per demo session of the `session_hash`.
+- **Hard review gate.** Block explorer link in Mission Control footer points to a real X Layer tx whose calldata contains the current `session_hash`. Trace contains `chain.commitment` event referencing the tx hash. **Pass = explorer link resolves on X Layer mainnet (this single mainnet tx is a non-funds-moving anchor and is the only sanctioned mainnet write); fail = explorer 404.**
+- **Claude Code reviews.** Copy clearly distinguishes "session anchor" (non-funds-moving on-chain commitment) from "execution" (always simulated). No conflation that could read as mainnet trading.
+- **Codex implements/verifies.** Minimal `SessionAnchor.sol` contract on X Layer with a `commit(bytes32)` write; backend signs and sends from a funded deploy key; resilient to failure (commitment failure is logged but does not block simulated execution).
+
+### Milestone 7 — Hour 64–70: Demo video + threat-model artifact + submission
+
+- **Goal.** 90-second demo video matching the script in §4, threat-model README finalized, submission form completed with X Layer deploy address + repo + video link.
+- **Hard review gate.** Three people who haven't seen the project watch the video cold and answer "what does this product do?" correctly (i.e., not "an agent" but "a verifier between agent and signature"). **Pass = 2/3 correct; fail = ≤1/3.**
+- **Claude Code reviews.** Video script omits the cut features (no mention of Yield Manager, no mainnet trading, no copy-trading). Investor pitch and judge pitch are both rehearsed and distinct. README threat-model maps each named incident to a specific gate.
+- **Codex implements/verifies.** Repo is publicly accessible, `make demo` brings up the full local stack including the tamper button, all property tests pass on a fresh checkout, demo seed data deterministic.
+
+### Milestone 8 — Hour 70–72: Reserve
+
+- **Goal.** Buffer for one judge-facing risk (broken video, X Layer outage, last-minute scanner bug).
+- **Hard review gate.** Submitted before deadline, screen recording of a clean tamper demo run uploaded as a backup artifact, demo URL works from a fresh browser session. **Pass = submission timestamp before deadline + backup recording exists + cold-browser demo loads in under 5 seconds; fail = any of the three missing.**
+- **Claude Code reviews.** Final pass on every judge-visible string: investor pitch, judge pitch, README first paragraph, video title, X post copy. Confirm the "Default: Simulated on X Layer" banner is present on every screen reachable from the demo entry point.
+- **Codex implements/verifies.** Production build pinned to a git tag; rollback script ready; one final property-test + Playwright run on the tagged build; deploy key and contract address recorded in `SUBMISSION.md`.
+
+---
+
+**Sprint-level notes that bind across milestones.**
+
+The three structural bugs in the internal review (client-fabricated execution events, latest-event-of-type verifier semantics, scanner-verifier policy divergence) are the **load-bearing wall** of this hackathon submission. Every research finding reinforces that the wall is structurally what wins:
+
+- Build X 2026's most recent published rubric weights Technical 30 / UX 25 / Business 20 / OKX Integration 15 / Presentation 10. Fixing the three bugs is Technical. The Black Box modal redesign + policy console split is UX. The "agentic adjudication layer" company thesis is Business. The six skills wired into the trace chain is OKX Integration. The 90-second video is Presentation. The spine is the rubric.
+- Build X 2026 uniquely adds **AI judges reviewing code and on-chain data**. This rewards real commits, real tests, real on-chain X Layer txns (even non-funds-moving session anchors). Decorative skill calls and untested code will be detected. M6's on-chain commitment + M2's chaos test + M4's property test are all built for this judge.
+- "Most Active Agent" and "Most Popular" are special prizes signaling that on-chain volume and social traction matter independent of the rubric. M6 covers the former; the "Should ship" demo-video + X post covers the latter on a best-effort basis.
+- The narrative ties to OKX's stated 2026 priorities: Jason Lau's *"agents need infrastructure built for them — not adapted from tools designed for humans"* directly mirrors our pitch that policy engines and Blockaid-style guardians are tools built for humans. Star Xu's APP framing positions agentic commerce as the headline category; our adjudication artifact is the missing safety primitive for that category. We do not need to build APP — we need to be the audit layer APP will eventually require.
+
+**Where research suggests divergence from the existing spine — and why we do not follow it.**
+
+Two tempting diversions surfaced and are explicitly rejected:
+
+1. *"Pivot to an EigenLayer AVS so adjudication itself is verifiable."* The right product, the wrong sprint. The wedge claim ("OKX Agentic Wallet only signs after a tamper-evident Black Box proves the action passed gates") does not require AVS in 72 hours — it requires the local discipline to be airtight and the artifact to be legible. AVS belongs in roadmap M4.
+
+2. *"Pivot to agentic commerce / APP integration since that is OKX's headline 2026 narrative."* Tempting because APP shipped April 29, 2026 and is the loudest sponsor signal. Rejected because (a) we cannot ship a meaningful APP integration in 72 hours without abandoning the verifier work, (b) the verifier story is **complementary** to APP — agent-to-agent payments require exactly the audit primitive we are building — and (c) the demo's "Tamper button flips red" moment is dramatically stronger than any commerce flow we could ship in the time budget. We position the project in the demo voiceover as *"the audit layer agent commerce will need"* and gain the narrative benefit without paying the build cost.
+
+The spine stands. Ship the three fixes, rebuild the Black Box modal as the artifact a judge would photograph, wire two more OKX skills into the hash chain, anchor one session per demo on X Layer, narrate against Freysa/AIXBT/BasisOS, and let the red tamper-flip do the closing argument.

@@ -1,0 +1,19 @@
+{
+  "maxPositionPct": 5,
+  "maxSlippageBps": 100,
+  "allowedChains": ["X Layer", "Solana", "Base", "Ethereum"],
+  "signingMode": "simulated",
+  "executionMode": "fixture",
+  "realFundsCapUsd": 50,
+  "requiresUserConfirmation": true,
+  "requiresTraceIntegrity": true,
+  "requiredEventsBeforeExecution": [
+    "candidate.created",
+    "risk.security_check",
+    "risk.verdict",
+    "allocation.sized",
+    "route.quoted",
+    "quote.simulation",
+    "user.confirmed"
+  ]
+}

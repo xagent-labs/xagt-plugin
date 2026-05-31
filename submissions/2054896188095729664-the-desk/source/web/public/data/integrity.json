@@ -1,0 +1,8 @@
+{
+  "valid": true,
+  "eventCount": 14,
+  "sessionId": "session_demo_blackbox",
+  "sessionHash": "sha256:c7daad802c79b6b3e3dbf483adb845c5894c846346e9e151f5c2422710f0d831",
+  "lastEventHash": "sha256:4df613bc2665abcc3f9d869266bd40ecdf503487521c588fb251ec7418edd420",
+  "errors": []
+}

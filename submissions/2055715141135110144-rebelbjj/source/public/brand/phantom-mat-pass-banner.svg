@@ -1,0 +1,72 @@
+<svg width="1200" height="630" viewBox="0 0 1200 630" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">Rebel BJJ Banner</title>
+  <desc id="desc">Hackathon banner for Rebel BJJ, a Solana devnet training proof system built with Rust and Anchor.</desc>
+  <defs>
+    <linearGradient id="redField" x1="58" y1="38" x2="1160" y2="604" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FF1545"/>
+      <stop offset="0.46" stop-color="#D8002D"/>
+      <stop offset="1" stop-color="#58000F"/>
+    </linearGradient>
+    <linearGradient id="chainGlow" x1="692" y1="121" x2="1057" y2="508" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#14F195"/>
+      <stop offset="0.5" stop-color="#80ECFF"/>
+      <stop offset="1" stop-color="#9945FF"/>
+    </linearGradient>
+    <filter id="bannerShadow" x="-20%" y="-20%" width="140%" height="140%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="16" dy="18" stdDeviation="0" flood-color="#050505" flood-opacity="1"/>
+    </filter>
+    <pattern id="dots" width="28" height="28" patternUnits="userSpaceOnUse">
+      <circle cx="5" cy="5" r="2.2" fill="#F7F1DD" opacity="0.34"/>
+    </pattern>
+  </defs>
+
+  <rect width="1200" height="630" fill="#050505"/>
+  <path d="M0 0H1200V630H0V0Z" fill="url(#dots)" opacity="0.44"/>
+  <path d="M-60 506L768 -61H1266L438 566L-60 506Z" fill="url(#redField)"/>
+  <path d="M-10 93L926 18L856 102L-38 177L-10 93Z" fill="#FFDF3D"/>
+  <path d="M249 586L1200 516V630H163L249 586Z" fill="#F7F1DD"/>
+  <path d="M42 508L1124 432L1189 526L110 600L42 508Z" fill="#0B0B0D" opacity="0.8"/>
+
+  <g transform="translate(748 86)" filter="url(#bannerShadow)">
+    <path d="M180 0L354 64L324 309L180 420L36 309L6 64L180 0Z" fill="#0B0B0D" stroke="#F7F1DD" stroke-width="16"/>
+    <path d="M80 119C103 88 136 73 180 73C224 73 257 88 280 119C299 144 307 175 305 211C302 255 287 289 258 313C235 333 209 343 180 343C151 343 125 333 102 313C73 289 58 255 55 211C53 175 61 144 80 119Z" fill="#F7F1DD"/>
+    <path d="M86 211C107 179 138 163 180 163C222 163 253 179 274 211C261 247 230 266 180 266C130 266 99 247 86 211Z" fill="#050505"/>
+    <path d="M103 188C118 172 139 164 165 164C155 193 134 209 101 211C99 202 100 195 103 188Z" fill="#F7F1DD"/>
+    <path d="M257 188C242 172 221 164 195 164C205 193 226 209 259 211C261 202 260 195 257 188Z" fill="#F7F1DD"/>
+    <path d="M133 312C158 323 202 323 227 312" stroke="#050505" stroke-width="12" stroke-linecap="round"/>
+    <path d="M83 357H277L255 379H61L83 357Z" fill="url(#chainGlow)"/>
+    <path d="M105 389H299L277 411H83L105 389Z" fill="url(#chainGlow)"/>
+  </g>
+
+  <g transform="translate(780 382)">
+    <rect x="0" y="0" width="98" height="142" rx="14" transform="rotate(-13 0 0)" fill="#F7F1DD" stroke="#050505" stroke-width="10"/>
+    <text x="29" y="72" transform="rotate(-13 29 72)" fill="#FF1144" font-family="Arial Black, Impact, sans-serif" font-size="62" font-weight="900">A</text>
+    <rect x="204" y="-32" width="98" height="142" rx="14" transform="rotate(14 204 -32)" fill="#F7F1DD" stroke="#050505" stroke-width="10"/>
+    <text x="235" y="43" transform="rotate(14 235 43)" fill="#050505" font-family="Arial Black, Impact, sans-serif" font-size="62" font-weight="900">K</text>
+  </g>
+
+  <g filter="url(#bannerShadow)">
+    <text x="64" y="263" fill="#F7F1DD" font-family="Arial Black, Impact, sans-serif" font-size="118" font-weight="900" letter-spacing="-3">REBEL</text>
+    <text x="506" y="263" fill="#FFDF3D" font-family="Arial Black, Impact, sans-serif" font-size="118" font-weight="900" letter-spacing="-3">BJJ</text>
+    <path d="M72 288H772L742 323H42L72 288Z" fill="#0B0B0D" stroke="#F7F1DD" stroke-width="6"/>
+    <text x="92" y="314" fill="#F7F1DD" font-family="Arial Black, Impact, sans-serif" font-size="24" font-weight="900" letter-spacing="2">PHANTOM MAT PASS / TRAINING IDENTITY</text>
+
+    <rect x="66" y="366" width="646" height="76" fill="#050505" stroke="#F7F1DD" stroke-width="8"/>
+    <text x="92" y="415" fill="#F7F1DD" font-family="Arial Black, Impact, sans-serif" font-size="34" font-weight="900" letter-spacing="1">PRIVATE TRAINING LOGS</text>
+    <path d="M626 399L679 399M659 379L679 399L659 419" stroke="#14F195" stroke-width="10" stroke-linecap="square" stroke-linejoin="miter"/>
+
+    <rect x="66" y="466" width="690" height="72" fill="#F7F1DD" stroke="#050505" stroke-width="8"/>
+    <text x="94" y="513" fill="#050505" font-family="Arial Black, Impact, sans-serif" font-size="32" font-weight="900" letter-spacing="1">VERIFIABLE PROOFS ON SOLANA</text>
+  </g>
+
+  <g>
+    <rect x="76" y="558" width="190" height="36" fill="#FF1545" stroke="#050505" stroke-width="5"/>
+    <text x="171" y="583" text-anchor="middle" fill="#F7F1DD" font-family="Arial Black, Impact, sans-serif" font-size="18" font-weight="900">WARM-UP WHEEL</text>
+    <rect x="286" y="558" width="208" height="36" fill="#0B0B0D" stroke="#F7F1DD" stroke-width="5"/>
+    <text x="390" y="583" text-anchor="middle" fill="#F7F1DD" font-family="Arial Black, Impact, sans-serif" font-size="20" font-weight="900">MATCH RECORD</text>
+    <rect x="518" y="558" width="210" height="36" fill="#9945FF" stroke="#050505" stroke-width="5"/>
+    <text x="623" y="583" text-anchor="middle" fill="#F7F1DD" font-family="Arial Black, Impact, sans-serif" font-size="20" font-weight="900">GAME TRAINING</text>
+    <rect x="752" y="558" width="170" height="36" fill="#14F195" stroke="#050505" stroke-width="5"/>
+    <text x="837" y="583" text-anchor="middle" fill="#050505" font-family="Arial Black, Impact, sans-serif" font-size="21" font-weight="900">ON-CHAIN</text>
+  </g>
+</svg>

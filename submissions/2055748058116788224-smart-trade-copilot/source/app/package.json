@@ -1,0 +1,35 @@
+{
+  "name": "smart-trade-copilot",
+  "version": "1.0.0",
+  "description": "AI trade copilot that chains the OKX onchainos skill suite into one safety-gated BUY / CAUTION / AVOID verdict, then executes the swap only after explicit confirmation.",
+  "type": "module",
+  "bin": {
+    "smart-trade-copilot": "src/index.js",
+    "stc": "src/index.js"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "analyze": "node src/index.js analyze",
+    "demo": "node src/index.js --demo analyze BONK --chain solana",
+    "test": "node tests/verdict.test.mjs"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "keywords": [
+    "okx",
+    "onchainos",
+    "defi",
+    "trading",
+    "security",
+    "rug-check",
+    "ai-agent",
+    "hackathon"
+  ],
+  "author": "Victor Jayeoba (https://github.com/victorjayeoba)",
+  "license": "MIT",
+  "dependencies": {
+    "chalk": "^5.3.0",
+    "ora": "^8.1.0"
+  }
+}

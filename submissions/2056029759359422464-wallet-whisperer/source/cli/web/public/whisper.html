@@ -1,0 +1,885 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Wallet Whisperer — App</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Poppins:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root { --bg:#fff; --bg-tint:#f7faff; --ink:#0a0f1a; --muted:#6b7280; --line:#e6ecf5; --blue:#2563eb; --blue-soft:#3b82f6; --blue-deep:#1e40af; }
+    html, body { background: var(--bg); color: var(--ink); font-family: 'Poppins', system-ui, sans-serif; -webkit-font-smoothing: antialiased; font-weight: 400; }
+    .serif { font-family: 'Instrument Serif', 'Times New Roman', serif; letter-spacing: -0.012em; }
+    .mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+    html { scroll-behavior: smooth; }
+    ::selection { background: rgba(37,99,235,0.18); color: var(--ink); }
+
+    /* Ambient blobs (very faint in app) */
+    .blob-stage { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 0; }
+    .blob { position: absolute; border-radius: 50%; filter: blur(110px); opacity: 0.30; }
+    .blob.b1 { width: 480px; height: 480px; background: radial-gradient(circle, #60a5fa, transparent 65%); top: -200px; left: 20%; animation: float-a 18s ease-in-out infinite; }
+    .blob.b2 { width: 420px; height: 420px; background: radial-gradient(circle, #c7d2fe, transparent 65%); top: -180px; right: 10%; animation: float-b 22s ease-in-out infinite; }
+    @keyframes float-a { 0%,100% { transform: translate(0,0) scale(1); } 50% { transform: translate(40px, 60px) scale(1.08); } }
+    @keyframes float-b { 0%,100% { transform: translate(0,0) scale(1); } 50% { transform: translate(-40px, 50px) scale(1.06); } }
+
+    .fade-up { opacity: 0; transform: translateY(16px); animation: fadeUp .9s cubic-bezier(.18,.7,.2,1) forwards; }
+    .d1 { animation-delay: .08s; } .d2 { animation-delay: .18s; } .d3 { animation-delay: .30s; }
+    @keyframes fadeUp { from { opacity:0; transform: translateY(16px); } to { opacity:1; transform: translateY(0); } }
+
+    .stagger > * { opacity: 0; transform: translateY(14px); animation: fadeUp .8s cubic-bezier(.18,.7,.2,1) forwards; }
+    .stagger > *:nth-child(1) { animation-delay: .05s; }
+    .stagger > *:nth-child(2) { animation-delay: .18s; }
+    .stagger > *:nth-child(3) { animation-delay: .31s; }
+    .stagger > *:nth-child(4) { animation-delay: .44s; }
+
+    .btn { display: inline-flex; align-items: center; gap: .55rem; padding: .75rem 1.4rem; border-radius: 999px; font-weight: 500; font-size: .9rem; transition: all .25s cubic-bezier(.2,.7,.2,1); position: relative; overflow: hidden; }
+    .btn-primary { background: linear-gradient(135deg, var(--blue) 0%, var(--blue-deep) 100%); color: white; box-shadow: 0 10px 24px -10px rgba(37,99,235,0.55); font-weight: 500; }
+    .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 18px 36px -12px rgba(37,99,235,0.65); }
+    .btn-primary:disabled { opacity: .55; cursor: not-allowed; transform: none; }
+    .btn-secondary { border: 1px solid var(--line); color: var(--ink); background: white; }
+    .btn-secondary:hover { border-color: var(--blue); color: var(--blue); transform: translateY(-2px); }
+    .btn-primary::after { content: ''; position: absolute; inset: 0; background: linear-gradient(120deg, transparent 30%, rgba(255,255,255,0.35) 50%, transparent 70%); transform: translateX(-100%); transition: transform .8s ease; }
+    .btn-primary:hover::after { transform: translateX(100%); }
+
+    .card { background: white; border: 1px solid var(--line); border-radius: 22px; transition: all .35s cubic-bezier(.18,.7,.2,1); position: relative; overflow: hidden; }
+    .card-soft { background: white; border: 1px solid var(--line); border-radius: 16px; }
+    .card:hover { border-color: rgba(37,99,235,0.25); box-shadow: 0 14px 40px -22px rgba(37,99,235,0.18); }
+
+    .navbar { backdrop-filter: blur(18px) saturate(1.2); background: rgba(255,255,255,0.78); }
+
+    .input, .select-input { background: white; border: 1px solid var(--line); border-radius: 14px; padding: .85rem 1.05rem; font-size: .95rem; outline: none; transition: all .2s ease; color: var(--ink); font-family: inherit; }
+    .input:focus, .select-input:focus { border-color: var(--blue); box-shadow: 0 0 0 4px rgba(37,99,235,0.12); }
+    .input::placeholder { color: #9aa3b2; }
+
+    .chip { display: inline-flex; align-items: center; gap: .35rem; padding: .25rem .7rem; border-radius: 999px; font-size: .72rem; font-weight: 500; }
+    .chip.green { background: #d1fae5; color: #065f46; }
+    .chip.blue  { background: #dbeafe; color: #1e40af; }
+    .chip.yellow{ background: #fef3c7; color: #92400e; }
+    .chip.red   { background: #fee2e2; color: #991b1b; }
+    .chip.gray  { background: #f1f5f9; color: #475569; }
+
+    @keyframes shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
+    .shimmer { background: linear-gradient(90deg, rgba(0,0,0,0.04), rgba(0,0,0,0.10), rgba(0,0,0,0.04)); background-size: 200% 100%; animation: shimmer 1.6s linear infinite; border-radius: 8px; height: 14px; }
+
+    .score-arc { transform: rotate(-90deg); transform-origin: center; }
+
+    .bar-bg { height: 6px; border-radius: 999px; background: #eef2f8; overflow: hidden; }
+    .bar-fill { height: 100%; background: linear-gradient(90deg, var(--blue-soft), var(--blue)); border-radius: 999px; transition: width 1s cubic-bezier(.18,.7,.2,1); }
+
+    .pulse-dot { width: 8px; height: 8px; border-radius: 50%; background: #34d399; position: relative; display: inline-block; }
+    .pulse-dot::after { content: ''; position: absolute; inset: -4px; border-radius: 50%; background: #34d399; opacity: 0.45; animation: pulse 1.8s ease-out infinite; }
+    @keyframes pulse { 0% { transform: scale(0.85); opacity: 0.6; } 100% { transform: scale(1.8); opacity: 0; } }
+
+    /* ——— SIDEBAR NAV ——— */
+    .nav-item {
+      display: flex; align-items: center; gap: .65rem;
+      padding: .65rem .85rem; border-radius: 12px;
+      color: #64748b; font-size: .9rem; font-weight: 500;
+      cursor: pointer; transition: all .2s ease;
+      border: 1px solid transparent;
+    }
+    .nav-item:hover:not(.disabled) { color: #0f172a; background: #f8fafc; }
+    .nav-item.active {
+      background: #eff6ff; color: var(--blue); border-color: rgba(37,99,235,0.18);
+    }
+    .nav-item.disabled { color: #cbd5e1; cursor: not-allowed; }
+    .nav-item .icon {
+      width: 28px; height: 28px; border-radius: 8px; background: #f1f5f9;
+      display: inline-flex; align-items: center; justify-content: center;
+      transition: all .2s ease;
+    }
+    .nav-item.active .icon { background: rgba(37,99,235,0.12); color: var(--blue); }
+    .nav-item.disabled .icon { opacity: .5; }
+
+    /* Skills rows */
+    .skill-row {
+      display: grid; grid-template-columns: 14px 1fr auto; align-items: center; gap: .55rem;
+      padding: .45rem .55rem; border-radius: 10px;
+      transition: background .25s ease;
+    }
+    .skill-row.running { background: rgba(37,99,235,0.07); }
+    .skill-row.done { opacity: 0.85; }
+    .skill-row.idle .skill-name { color: #94a3b8; }
+    .skill-icon { width: 12px; height: 12px; border-radius: 50%; border: 1.5px solid #d4dcea; transition: all .25s ease; }
+    .skill-row.running .skill-icon { border-color: var(--blue); background: var(--blue); box-shadow: 0 0 0 5px rgba(37,99,235,0.25); animation: pulseSm 1s ease-in-out infinite; }
+    @keyframes pulseSm { 0%,100% { transform: scale(1); } 50% { transform: scale(1.45); } }
+    .skill-row.done .skill-icon { background: #10b981; border-color: #10b981; }
+    .skill-name { font-family: 'JetBrains Mono', monospace; font-size: .72rem; color: #334155; line-height: 1.3; }
+    .skill-row.running .skill-name { color: var(--blue); font-weight: 600; }
+    .skill-row.done    .skill-name { color: #047857; }
+    .skill-op   { font-size: .68rem; color: #64748b; display: block; margin-top: 1px; }
+    .skill-row.running .skill-op::after {
+      content: '…'; display: inline-block; margin-left: 2px;
+      animation: dots 1.4s steps(4, end) infinite; overflow: hidden; vertical-align: bottom;
+    }
+    @keyframes dots { 0% { width: 0; } 100% { width: .9em; } }
+    .skill-ms   { font-size: .65rem; color: #94a3b8; font-family: 'JetBrains Mono', monospace; }
+    .skill-row.running .skill-ms { color: var(--blue); }
+
+    .activity-log {
+      max-height: 140px; overflow-y: auto; font-family: 'JetBrains Mono', monospace;
+      font-size: .65rem; color: #64748b; padding: .5rem .65rem; background: #f8fafc;
+      border-radius: 10px; border: 1px solid var(--line);
+    }
+    .activity-log div { padding: 1px 0; }
+    .activity-log .ev-start { color: #2563eb; }
+    .activity-log .ev-done  { color: #059669; }
+    .activity-log .ev-err   { color: #dc2626; }
+
+    /* Tabs (used in mirror wizard) */
+    .tab-btn { padding: .55rem .95rem; border-radius: 12px; font-size: .82rem; color: #6b7280; transition: all .2s ease; cursor: pointer; border: 1px solid transparent; font-weight: 500; }
+    .tab-btn.active { background: #eff6ff; color: var(--blue); border-color: rgba(37,99,235,0.18); }
+    .tab-btn:hover:not(.active) { color: #1f2937; }
+
+    .step-list { counter-reset: step; }
+    .step-list > li { counter-increment: step; padding-left: 2.2rem; position: relative; padding-bottom: 1.2rem; }
+    .step-list > li::before {
+      content: counter(step); position: absolute; left: 0; top: 0;
+      width: 26px; height: 26px; border-radius: 50%;
+      background: var(--blue); color: white;
+      font-family: 'Instrument Serif', serif; font-size: .9rem;
+      display: flex; align-items: center; justify-content: center;
+    }
+
+    .codepad { background: var(--ink); color: #cbd5e1; border-radius: 10px; padding: .7rem .9rem; font-family: 'JetBrains Mono', monospace; font-size: .76rem; display: flex; justify-content: space-between; align-items: center; gap: .8rem; }
+    .copy-btn { color: #94a3b8; font-size: .7rem; padding: .25rem .55rem; border-radius: 6px; transition: all .18s ease; cursor: pointer; user-select: none; border: 1px solid #334155; flex-shrink: 0; }
+    .copy-btn:hover { background: #1f2937; color: #e0e7ff; border-color: #475569; }
+    .copy-btn.copied { color: #34d399; border-color: #34d399; }
+
+    /* Empty states */
+    .empty-state { padding: 4rem 2rem; text-align: center; color: #94a3b8; }
+  </style>
+</head>
+<body>
+
+  <nav class="navbar sticky top-0 z-30 border-b border-slate-200/60">
+    <div class="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
+      <a href="/" class="flex items-center gap-2.5">
+        <div class="w-8 h-8 rounded-xl bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-white text-sm font-bold shadow-lg shadow-blue-500/30">W</div>
+        <span class="font-semibold tracking-tight">Wallet Whisperer</span>
+      </a>
+      <div class="flex items-center gap-5 text-sm">
+        <a href="/" class="text-slate-600 hover:text-slate-900 transition hidden sm:block">Home</a>
+        <a href="/setup" class="text-slate-600 hover:text-slate-900 transition hidden sm:block">Setup</a>
+        <a href="https://github.com/Temitope15/wallet-whisperer" target="_blank" rel="noopener" class="text-slate-600 hover:text-slate-900 transition hidden sm:inline-flex items-center gap-1.5">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.56 0-.27-.01-1-.02-1.96-3.2.7-3.88-1.54-3.88-1.54-.52-1.33-1.28-1.69-1.28-1.69-1.05-.72.08-.71.08-.71 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.7 0-1.26.45-2.29 1.19-3.1-.12-.29-.51-1.46.11-3.04 0 0 .97-.31 3.18 1.18.92-.26 1.91-.39 2.89-.39.98 0 1.97.13 2.89.39 2.21-1.49 3.18-1.18 3.18-1.18.62 1.58.23 2.75.11 3.04.74.81 1.19 1.84 1.19 3.1 0 4.43-2.7 5.41-5.27 5.7.41.35.77 1.05.77 2.11 0 1.52-.01 2.74-.01 3.11 0 .31.21.67.8.56C20.21 21.39 23.5 17.08 23.5 12 23.5 5.65 18.35.5 12 .5z"/></svg>
+          GitHub
+        </a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- HERO + SEARCH -->
+  <section class="relative overflow-hidden">
+    <div class="blob-stage"><div class="blob b1"></div><div class="blob b2"></div></div>
+    <div class="relative max-w-3xl mx-auto px-6 pt-12 pb-8 text-center">
+      <div class="fade-up inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/70 border border-blue-100 backdrop-blur text-xs text-slate-700 mb-5">
+        <span class="pulse-dot"></span>
+        Live · OKX OnchainOS
+      </div>
+      <h1 class="serif fade-up d1 text-[2.2rem] sm:text-[2.8rem] leading-[1.1] tracking-tight text-slate-900">
+        Paste a wallet. See its <em class="italic">personality</em>.
+      </h1>
+
+      <form id="profile-form" class="fade-up d2 mt-7 flex gap-2 flex-col sm:flex-row max-w-2xl mx-auto">
+        <input id="address-input" type="text" placeholder="0x… or Solana base58 address" class="mono input flex-1 text-left" autocomplete="off" spellcheck="false" />
+        <select id="chain-select" class="select-input mono">
+          <option value="">auto</option>
+          <option value="solana">solana</option>
+          <option value="ethereum">ethereum</option>
+          <option value="base">base</option>
+          <option value="bsc">bsc</option>
+          <option value="arbitrum">arbitrum</option>
+          <option value="polygon">polygon</option>
+        </select>
+        <button type="submit" id="submit-btn" class="btn btn-primary">
+          Whisper
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
+        </button>
+      </form>
+
+      <div class="fade-up d3 mt-3 text-xs text-slate-500">
+        Try
+        <button data-sample="21czpZj3BxT75dVbzmUJtE5QznJrLrYHHaF5pT4CpWM1" data-chain="solana" class="sample mono text-blue-600 hover:text-blue-800 transition font-medium">21czp…pWM1 (solana)</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- MAIN: sidebar + content -->
+  <div class="max-w-7xl mx-auto px-6 pb-32 grid grid-cols-1 lg:grid-cols-[260px_1fr] gap-8">
+
+    <!-- LEFT SIDEBAR -->
+    <aside class="lg:sticky lg:top-24 lg:self-start space-y-5">
+
+      <!-- NAV PILLS -->
+      <div>
+        <div class="text-[10px] uppercase tracking-widest text-slate-400 font-semibold mb-2 px-1">Views</div>
+        <div class="space-y-1">
+          <button class="nav-item active w-full text-left" data-view="whisper">
+            <span class="icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M2 12c1.5-4 5-7 10-7s8.5 3 10 7c-1.5 4-5 7-10 7s-8.5-3-10-7z"/></svg></span>
+            Persona
+          </button>
+          <button class="nav-item disabled w-full text-left" data-view="replay">
+            <span class="icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19"/></svg></span>
+            Trade replay
+          </button>
+          <button class="nav-item disabled w-full text-left" data-view="mirror">
+            <span class="icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 0 1 9-9 9 9 0 0 1 6.4 2.6l2.6 2.6"/><polyline points="21 3 21 9 15 9"/><path d="M21 12a9 9 0 0 1-9 9 9 9 0 0 1-6.4-2.6L3 15.8"/><polyline points="3 21 3 15 9 15"/></svg></span>
+            Mirror
+          </button>
+        </div>
+      </div>
+
+      <!-- ENGINE -->
+      <div class="card-soft p-4">
+        <div class="flex items-center justify-between mb-2">
+          <div class="text-[10px] uppercase tracking-widest text-slate-400 font-semibold">OKX engine</div>
+          <div id="engine-status" class="text-[10px] text-slate-400 mono">idle</div>
+        </div>
+        <div id="skill-list" class="space-y-0.5"></div>
+      </div>
+
+      <!-- ACTIVITY LOG -->
+      <div>
+        <div class="text-[10px] uppercase tracking-widest text-slate-400 font-semibold mb-2 px-1">Activity log</div>
+        <div id="activity-log" class="activity-log"><div class="text-slate-400">Run a wallet to see the engine fire.</div></div>
+      </div>
+
+      <div class="text-[11px] text-slate-500 leading-relaxed px-1 pt-1">
+        Every row above is a real <span class="mono text-slate-700">onchainos</span> call. Nothing mocked.
+      </div>
+    </aside>
+
+    <!-- RIGHT: content -->
+    <main class="min-h-[400px]">
+      <div id="empty" class="empty-state">
+        <div class="serif text-3xl text-slate-300">Paste a wallet to begin.</div>
+        <div class="text-sm text-slate-400 mt-2">Try the sample address above — pulls in ~9 seconds.</div>
+      </div>
+      <div id="view-whisper" class="hidden"></div>
+      <div id="view-replay"  class="hidden"></div>
+      <div id="view-mirror"  class="hidden"></div>
+    </main>
+  </div>
+
+  <footer class="border-t border-slate-200 bg-gradient-to-b from-white to-slate-50/50">
+    <div class="max-w-7xl mx-auto px-6 py-10 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-500">
+      <span class="mono">wallet-whisperer · v1.0.0</span>
+      <span>Built on OKX OnchainOS · MIT licensed</span>
+      <a href="https://github.com/Temitope15/wallet-whisperer" target="_blank" rel="noopener" class="text-slate-600 hover:text-blue-600 transition inline-flex items-center gap-1.5">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.56 0-.27-.01-1-.02-1.96-3.2.7-3.88-1.54-3.88-1.54-.52-1.33-1.28-1.69-1.28-1.69-1.05-.72.08-.71.08-.71 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.7 0-1.26.45-2.29 1.19-3.1-.12-.29-.51-1.46.11-3.04 0 0 .97-.31 3.18 1.18.92-.26 1.91-.39 2.89-.39.98 0 1.97.13 2.89.39 2.21-1.49 3.18-1.18 3.18-1.18.62 1.58.23 2.75.11 3.04.74.81 1.19 1.84 1.19 3.1 0 4.43-2.7 5.41-5.27 5.7.41.35.77 1.05.77 2.11 0 1.52-.01 2.74-.01 3.11 0 .31.21.67.8.56C20.21 21.39 23.5 17.08 23.5 12 23.5 5.65 18.35.5 12 .5z"/></svg>
+        GitHub →
+      </a>
+    </div>
+  </footer>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const skillList = $('#skill-list');
+const activityLog = $('#activity-log');
+const engineStatus = $('#engine-status');
+
+let currentData = null; // cached result for switching views
+
+// —— OKX skills catalogue ——
+const SKILL_CATALOG = [
+  { name: 'okx-agentic-wallet', op: 'wallet status' },
+  { name: 'okx-dex-market',     op: 'portfolio-overview' },
+  { name: 'okx-dex-market',     op: 'portfolio-recent-pnl' },
+  { name: 'okx-tracker',        op: 'activities' },
+  { name: 'okx-security',       op: 'token-scan' },
+];
+function renderSkillList() {
+  skillList.innerHTML = SKILL_CATALOG.map((s) => `
+    <div class="skill-row idle" data-key="${s.name}::${s.op}">
+      <div class="skill-icon"></div>
+      <div>
+        <div class="skill-name">${s.name}<span class="skill-op">${s.op}</span></div>
+      </div>
+      <div class="skill-ms" data-ms></div>
+    </div>
+  `).join('');
+}
+renderSkillList();
+
+// Live-ticker for the currently-running skill row.
+let liveTickerInterval = null;
+let liveTickerStart = 0;
+let liveTickerEl = null;
+function startLiveTicker(row) {
+  stopLiveTicker();
+  liveTickerEl = row.querySelector('[data-ms]');
+  liveTickerStart = performance.now();
+  liveTickerInterval = setInterval(() => {
+    if (!liveTickerEl) return;
+    liveTickerEl.textContent = `${Math.round(performance.now() - liveTickerStart)}ms`;
+  }, 33);
+}
+function stopLiveTicker() {
+  if (liveTickerInterval) clearInterval(liveTickerInterval);
+  liveTickerInterval = null;
+  liveTickerEl = null;
+}
+
+function updateSkill(ev) {
+  const key = `${ev.name}::${ev.op}`;
+  const row = document.querySelector(`.skill-row[data-key="${key}"]`);
+  if (!row) return;
+  row.classList.remove('idle', 'running', 'done');
+  if (ev.status === 'started') {
+    row.classList.add('running');
+    startLiveTicker(row);
+  } else if (ev.status === 'completed') {
+    row.classList.add('done');
+    stopLiveTicker();
+    if (ev.ms != null) row.querySelector('[data-ms]').textContent = `${ev.ms}ms`;
+  } else {
+    row.classList.add('idle');
+    stopLiveTicker();
+  }
+}
+function logEvent(ev) {
+  const now = new Date().toISOString().slice(11, 19);
+  const cls = ev.status === 'started' ? 'ev-start' : ev.status === 'completed' ? 'ev-done' : 'ev-err';
+  const text = ev.status === 'started' ? `→ ${ev.name} ${ev.op}`
+    : ev.status === 'completed' ? `✓ ${ev.name} ${ev.op}  (${ev.ms ?? '?'}ms)`
+    : `✗ ${ev.name} ${ev.op}`;
+  if (activityLog.children.length === 1 && activityLog.children[0].textContent.startsWith('Run')) activityLog.innerHTML = '';
+  const div = document.createElement('div');
+  div.className = cls;
+  div.textContent = `[${now}] ${text}`;
+  activityLog.appendChild(div);
+  activityLog.scrollTop = activityLog.scrollHeight;
+}
+function resetEngine() {
+  renderSkillList();
+  activityLog.innerHTML = '';
+  engineStatus.textContent = 'running…';
+  engineStatus.classList.remove('text-slate-400', 'text-emerald-600', 'text-rose-600');
+  engineStatus.classList.add('text-blue-600');
+}
+function endEngine(ok = true) {
+  engineStatus.textContent = ok ? 'done' : 'failed';
+  engineStatus.classList.remove('text-blue-600');
+  engineStatus.classList.add(ok ? 'text-emerald-600' : 'text-rose-600');
+}
+
+// —— Nav handling ——
+function setView(view) {
+  document.querySelectorAll('.nav-item').forEach((n) => n.classList.toggle('active', n.dataset.view === view));
+  $('#empty').classList.toggle('hidden', !!currentData);
+  $('#view-whisper').classList.toggle('hidden', view !== 'whisper' || !currentData);
+  $('#view-replay').classList.toggle('hidden',  view !== 'replay'  || !currentData);
+  $('#view-mirror').classList.toggle('hidden',  view !== 'mirror'  || !currentData);
+  if (view === 'replay' && currentData) renderReplayView(currentData);
+  if (view === 'mirror' && currentData) renderMirrorView(currentData);
+}
+document.querySelectorAll('.nav-item').forEach((n) => n.addEventListener('click', () => {
+  if (n.classList.contains('disabled')) return;
+  setView(n.dataset.view);
+}));
+function enableNav() {
+  document.querySelectorAll('.nav-item').forEach((n) => {
+    n.classList.remove('disabled');
+    n.removeAttribute('disabled');
+  });
+}
+
+// —— Search submit ——
+document.querySelectorAll('.sample').forEach((b) => {
+  b.addEventListener('click', () => {
+    $('#address-input').value = b.dataset.sample;
+    $('#chain-select').value = b.dataset.chain;
+  });
+});
+
+$('#profile-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const address = $('#address-input').value.trim();
+  const chain = $('#chain-select').value;
+  if (!address) return;
+  $('#submit-btn').disabled = true;
+  resetEngine();
+  currentData = null;
+  document.querySelectorAll('.nav-item').forEach((n) => n.classList.add('disabled'));
+  document.querySelector('[data-view="whisper"]').classList.remove('disabled');
+  setView('whisper');
+  renderLoading(address);
+
+  const params = new URLSearchParams({ address });
+  if (chain) params.set('chain', chain);
+  const es = new EventSource(`/api/profile/stream?${params}`);
+
+  es.addEventListener('skill', (e) => { const ev = JSON.parse(e.data); updateSkill(ev); logEvent(ev); });
+  es.addEventListener('result', (e) => {
+    es.close();
+    endEngine(true);
+    currentData = JSON.parse(e.data);
+    renderWhisperView(currentData);
+    enableNav();
+    $('#submit-btn').disabled = false;
+  });
+  es.addEventListener('fail', (e) => {
+    es.close();
+    endEngine(false);
+    renderError(JSON.parse(e.data).error || 'Profile failed');
+    $('#submit-btn').disabled = false;
+  });
+  es.onerror = () => { es.close(); endEngine(false); $('#submit-btn').disabled = false; };
+});
+
+// —— Formatters ——
+function shortAddr(a) { if (!a) return ''; return a.length > 12 ? `${a.slice(0,6)}…${a.slice(-4)}` : a; }
+function fmtUsd(v, places = 2) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return '$0';
+  const abs = Math.abs(n);
+  if (abs >= 1000) return `${n < 0 ? '-' : ''}$${Math.round(abs).toLocaleString('en-US')}`;
+  return `${n < 0 ? '-' : ''}$${abs.toFixed(places)}`;
+}
+function fmtPct(v) { const n = Number(v); return `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`; }
+function fmtHold(seconds) {
+  const s = Number(seconds);
+  if (!Number.isFinite(s) || s <= 0) return '—';
+  if (s < 60) return `${Math.round(s)}s`;
+  if (s < 3600) return `${Math.round(s/60)}m`;
+  if (s < 86400) { const h = Math.floor(s/3600), m = Math.round((s%3600)/60); return `${h}h ${m}m`; }
+  const d = Math.floor(s/86400), h = Math.round((s%86400)/3600); return `${d}d ${h}h`;
+}
+function fmtTs(t) { if (!t) return '—'; const ms = Number(t) > 1e12 ? Number(t) : Number(t) * 1000; return new Date(ms).toISOString().replace('T', ' ').slice(0,16) + ' UTC'; }
+function fmtPrice(p) { const n = Number(p); if (!Number.isFinite(n) || n <= 0) return '$0'; if (n >= 1) return `$${n.toFixed(4)}`; if (n >= 0.01) return `$${n.toFixed(6)}`; return `$${n.toExponential(3)}`; }
+function pnlClass(n) { return Number(n) > 0 ? 'text-emerald-600' : Number(n) < 0 ? 'text-rose-600' : 'text-slate-500'; }
+function scoreColor(score) {
+  if (score >= 7) return 'text-emerald-600';
+  if (score >= 5) return 'text-blue-600';
+  if (score >= 4) return 'text-amber-600';
+  return 'text-rose-600';
+}
+function scoreStroke(score) {
+  if (score >= 7) return 'stroke-emerald-500';
+  if (score >= 5) return 'stroke-blue-500';
+  if (score >= 4) return 'stroke-amber-500';
+  return 'stroke-rose-500';
+}
+
+// —— Loading & error ——
+function renderLoading(addr) {
+  $('#empty').classList.add('hidden');
+  $('#view-whisper').classList.remove('hidden');
+  $('#view-whisper').innerHTML = `
+    <div class="card p-7">
+      <div class="flex items-center gap-3 text-slate-500 text-sm">
+        <svg class="animate-spin h-4 w-4 text-blue-600" viewBox="0 0 24 24" fill="none">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3"></circle>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v3a5 5 0 00-5 5H4z"></path>
+        </svg>
+        Streaming on-chain history for <span class="mono text-slate-700">${shortAddr(addr)}</span>… watch the engine on the left.
+      </div>
+      <div class="mt-6 space-y-3">
+        <div class="shimmer w-1/2"></div>
+        <div class="shimmer w-2/3"></div>
+        <div class="shimmer w-1/3"></div>
+      </div>
+    </div>`;
+}
+function renderError(msg) {
+  $('#empty').classList.add('hidden');
+  $('#view-whisper').classList.remove('hidden');
+  $('#view-whisper').innerHTML = `<div class="card p-6 border-rose-200 bg-rose-50/50"><div class="text-rose-700 text-sm font-medium">${msg}</div></div>`;
+}
+
+// —— WHISPER (default view): one big persona card ——
+function renderWhisperView(data) {
+  const { address, chain, persona } = data;
+  const score = persona.edge.score;
+  const scoreArcDash = (score / 10) * 226;
+  const pfText = persona.edge.profitFactor === null || !isFinite(persona.edge.profitFactor) ? '∞' : persona.edge.profitFactor.toFixed(2);
+  const sectorBuckets = (persona.mcTilt || []).slice(0, 3);
+  const totalMc = sectorBuckets.reduce((s, b) => s + b.count, 0) || 1;
+
+  $('#empty').classList.add('hidden');
+  $('#view-whisper').classList.remove('hidden');
+  $('#view-whisper').innerHTML = `
+    <div class="stagger space-y-6">
+
+      <!-- Headline persona -->
+      <div class="card p-8">
+        <div class="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <div class="text-xs uppercase tracking-widest text-slate-500 font-semibold mono">${chain}</div>
+            <div class="mono text-sm text-slate-500 mt-1">${shortAddr(address)}</div>
+            <div class="serif text-4xl text-slate-900 mt-4 leading-tight">
+              ${persona.style}
+              <span class="text-slate-400">·</span>
+              <span class="${scoreColor(score)}">${score.toFixed(1)} <span class="text-base text-slate-400">/ 10</span></span>
+            </div>
+            <div class="text-sm text-slate-600 mt-3 max-w-xl">${verdictText(persona)}</div>
+          </div>
+          <div class="relative w-28 h-28 flex-shrink-0">
+            <svg viewBox="0 0 80 80" class="absolute inset-0 w-full h-full">
+              <circle cx="40" cy="40" r="36" stroke-width="5" stroke="#eef2f8" fill="none"></circle>
+              <circle cx="40" cy="40" r="36" stroke-width="5" fill="none"
+                class="score-arc ${scoreStroke(score)}"
+                stroke-linecap="round" stroke-dasharray="${scoreArcDash} 226"></circle>
+            </svg>
+            <div class="absolute inset-0 flex items-center justify-center serif text-3xl ${scoreColor(score)}">${score.toFixed(1)}</div>
+          </div>
+        </div>
+
+        <div class="mt-7 grid grid-cols-2 sm:grid-cols-4 gap-5 pt-6 border-t border-slate-100">
+          <div>
+            <div class="text-xs text-slate-500 font-medium uppercase tracking-wider">Win rate</div>
+            <div class="serif text-2xl text-slate-900 mt-1">${persona.overview.winRatePct.toFixed(1)}<span class="text-base text-slate-400">%</span></div>
+          </div>
+          <div>
+            <div class="text-xs text-slate-500 font-medium uppercase tracking-wider">Realized PnL</div>
+            <div class="serif text-2xl mt-1 ${pnlClass(persona.overview.realizedPnl)}">${fmtUsd(persona.overview.realizedPnl)}</div>
+          </div>
+          <div>
+            <div class="text-xs text-slate-500 font-medium uppercase tracking-wider">Profit factor</div>
+            <div class="serif text-2xl text-slate-900 mt-1">${pfText}</div>
+          </div>
+          <div>
+            <div class="text-xs text-slate-500 font-medium uppercase tracking-wider">Median hold</div>
+            <div class="serif text-2xl text-slate-900 mt-1">${fmtHold(persona.medianHoldSec)}</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Fingerprint -->
+      <div class="card p-8">
+        <div class="text-xs uppercase tracking-widest text-slate-500 font-semibold mono">Fingerprint</div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-8 mt-5">
+          <div>
+            <div class="text-xs text-slate-500 font-medium uppercase tracking-wider">Sizing</div>
+            <div class="serif text-xl text-slate-900 mt-1">${persona.sizing.label}</div>
+            ${persona.sizing.label !== 'Insufficient Data' ? `<div class="text-xs text-slate-500 mt-1">median ${fmtUsd(persona.sizing.medianSize, 0)}, IQR ${fmtUsd(persona.sizing.iqrLow, 0)}–${fmtUsd(persona.sizing.iqrHigh, 0)}</div>` : ''}
+            <div class="text-xs text-slate-500 font-medium uppercase tracking-wider mt-6">Sector tilt</div>
+            <div class="text-slate-700 text-sm mt-1">${persona.sectorTiltLine}</div>
+            <div class="mt-3 space-y-2.5">
+              ${sectorBuckets.map((b) => {
+                const pct = (b.count / totalMc) * 100;
+                return `<div class="flex items-center gap-3 text-xs">
+                  <div class="w-28 text-slate-500 font-medium">${b.label}</div>
+                  <div class="flex-1 bar-bg"><div class="bar-fill" style="width:${pct}%"></div></div>
+                  <div class="w-12 text-right text-slate-400 mono">${pct.toFixed(0)}%</div>
+                </div>`;
+              }).join('')}
+            </div>
+          </div>
+          <div>
+            <div class="text-xs text-slate-500 font-medium uppercase tracking-wider">Behavioural tells</div>
+            <div class="mt-3 space-y-3">
+              ${(persona.tells || []).length === 0
+                ? '<div class="text-sm text-slate-500">No notable behavioural signatures detected.</div>'
+                : persona.tells.map((t) => `
+                  <div class="flex gap-3 items-start">
+                    <div class="w-2 h-2 mt-2 rounded-full bg-emerald-500 flex-shrink-0"></div>
+                    <div>
+                      <div class="font-semibold text-slate-900 text-sm">${t.name}</div>
+                      <div class="text-xs text-slate-500 mt-0.5 leading-relaxed">${t.evidence}</div>
+                    </div>
+                  </div>`).join('')}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Quick actions -->
+      <div class="card p-8">
+        <div class="serif text-2xl text-slate-900">What's next?</div>
+        <div class="text-sm text-slate-600 mt-2">Two optional drill-downs:</div>
+        <div class="mt-5 grid grid-cols-1 md:grid-cols-2 gap-3">
+          <button class="card-soft p-5 text-left hover:border-blue-300 hover:shadow-md transition" data-jump="replay">
+            <div class="flex items-center gap-2 mb-1">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-blue-600"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19"/></svg>
+              <span class="font-semibold text-slate-900">Trade replay</span>
+            </div>
+            <div class="text-sm text-slate-600">See the 3 best and 3 worst closed positions in the last 90 days.</div>
+          </button>
+          <button class="card-soft p-5 text-left hover:border-blue-300 hover:shadow-md transition" ${score < 4 ? 'disabled' : ''} data-jump="mirror">
+            <div class="flex items-center gap-2 mb-1">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-blue-600"><path d="M3 12a9 9 0 0 1 9-9 9 9 0 0 1 6.4 2.6l2.6 2.6"/><polyline points="21 3 21 9 15 9"/></svg>
+              <span class="font-semibold text-slate-900">Mirror setup</span>
+              ${score < 4 ? '<span class="chip red ml-2">disabled</span>' : ''}
+            </div>
+            <div class="text-sm text-slate-600">${score < 4 ? `Persona score ${score.toFixed(1)} is below the 4 / 10 safety threshold.` : 'Configure caps, preview candidates, and hand off to your agent host.'}</div>
+          </button>
+        </div>
+      </div>
+
+    </div>`;
+
+  document.querySelectorAll('[data-jump]').forEach((b) => {
+    if (b.disabled) return;
+    b.addEventListener('click', () => setView(b.dataset.jump));
+  });
+}
+
+function verdictText(persona) {
+  const wr = (persona.edge.winRate * 100).toFixed(0);
+  const pf = Number.isFinite(persona.edge.profitFactor) ? persona.edge.profitFactor.toFixed(2) : '∞';
+  const tellPhrase = persona.tells.length ? `Notable: ${persona.tells.map((t) => t.name).join(', ')}.` : '';
+  const note = persona.edge.score >= 6 ? 'Worth mirroring.'
+    : persona.edge.score >= 4 ? 'Mirrorable with tight slippage.'
+    : 'Below the mirror safety threshold.';
+  return `${wr}% win rate, profit factor ${pf}. ${tellPhrase} ${note}`;
+}
+
+// —— REPLAY view ——
+function renderReplayView(data) {
+  const { highlights } = data;
+  $('#view-replay').innerHTML = `
+    <div class="stagger space-y-5">
+      <div class="card p-8">
+        <div class="text-xs uppercase tracking-widest text-slate-500 font-semibold mono">Trade replay</div>
+        <div class="serif text-3xl text-slate-900 mt-2">The trades they wish you didn't see.</div>
+        <div class="text-sm text-slate-600 mt-2">Best ${highlights.best.length} and worst ${highlights.worst.length} closed positions in the last 100 trades.</div>
+      </div>
+
+      <div class="card p-8">
+        <div class="text-sm font-semibold text-emerald-700 mb-4 flex items-center gap-2"><span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span> Best ${highlights.best.length} trades</div>
+        <div class="space-y-3">${(highlights.best || []).map((t, i) => bigTradeCardHtml(t, i + 1, true)).join('')}</div>
+      </div>
+
+      <div class="card p-8">
+        <div class="text-sm font-semibold text-rose-700 mb-4 flex items-center gap-2"><span class="w-1.5 h-1.5 rounded-full bg-rose-500"></span> Worst ${highlights.worst.length} trades</div>
+        <div class="space-y-3">${(highlights.worst || []).map((t, i) => bigTradeCardHtml(t, i + 1, false)).join('')}</div>
+      </div>
+    </div>`;
+}
+
+function bigTradeCardHtml(t, n, isWin) {
+  const pnlCls = isWin ? 'text-emerald-700' : 'text-rose-700';
+  const pnl = isWin ? `+${fmtUsd(t.realizedPnlUsd)}` : fmtUsd(t.realizedPnlUsd);
+  const bg = isWin ? 'bg-emerald-50/40 border-emerald-100' : 'bg-rose-50/40 border-rose-100';
+  return `
+    <div class="rounded-xl border ${bg} p-5">
+      <div class="flex items-center justify-between flex-wrap gap-2">
+        <div class="flex items-center gap-2">
+          <span class="text-xs text-slate-400">#${n}</span>
+          <span class="font-semibold text-slate-900 text-base">${t.symbol}</span>
+        </div>
+        <div class="${pnlCls} font-semibold mono text-base">${pnl} <span class="text-xs text-slate-500">${fmtPct(t.realizedPnlPercent)}</span></div>
+      </div>
+      <div class="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs">
+        <div><div class="text-slate-400 uppercase tracking-wider">Bought</div><div class="mono text-slate-700 mt-0.5">${fmtUsd(t.buyTxVolume)}</div><div class="text-slate-500">@ ${fmtPrice(t.buyAvgPrice)}</div></div>
+        <div><div class="text-slate-400 uppercase tracking-wider">Sold</div><div class="mono text-slate-700 mt-0.5">${fmtUsd(t.sellTxVolume)}</div><div class="text-slate-500">@ ${fmtPrice(t.sellAvgPrice)}</div></div>
+        <div><div class="text-slate-400 uppercase tracking-wider">Held</div><div class="mono text-slate-700 mt-0.5">${fmtHold(t.holdSec)}</div></div>
+        <div><div class="text-slate-400 uppercase tracking-wider">Entered</div><div class="mono text-slate-700 mt-0.5">${fmtTs(t.entryTs)}</div></div>
+      </div>
+    </div>`;
+}
+
+// —— MIRROR view ——
+function renderMirrorView(data) {
+  const { address, chain, persona } = data;
+  const score = persona.edge.score;
+
+  if (score < 4) {
+    $('#view-mirror').innerHTML = `
+      <div class="card p-8">
+        <div class="text-xs uppercase tracking-widest text-slate-500 font-semibold mono">Mirror</div>
+        <div class="serif text-3xl text-slate-900 mt-2">Not mirrorable.</div>
+        <div class="text-sm text-slate-700 mt-3">Persona score <span class="${scoreColor(score)} font-semibold">${score.toFixed(1)} / 10</span> is below the 4 / 10 safety threshold.</div>
+      </div>`;
+    return;
+  }
+
+  $('#view-mirror').innerHTML = `
+    <div class="stagger space-y-5">
+      <div class="card p-8">
+        <div class="flex items-start justify-between flex-wrap gap-3">
+          <div>
+            <div class="text-xs uppercase tracking-widest text-slate-500 font-semibold mono">Mirror</div>
+            <div class="serif text-3xl text-slate-900 mt-2">Three steps to live mirroring.</div>
+            <div class="text-sm text-slate-600 mt-2 max-w-2xl">Every candidate requires your typed <span class="mono text-blue-700">execute</span> in the agent host.</div>
+          </div>
+          <div class="text-xs text-slate-500 text-right">
+            Source persona score
+            <div class="serif text-2xl ${scoreColor(score)} mt-0.5">${score.toFixed(1)} / 10</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- STEP 1 -->
+      <div class="card p-8">
+        <div class="text-xs uppercase tracking-widest text-slate-500 font-semibold mono mb-3">Step 1 — Set your caps</div>
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div>
+            <label class="text-xs text-slate-500 font-medium">Per-trade cap</label>
+            <div class="mt-1.5 flex items-center gap-2">
+              <input id="cap-per-trade" type="number" min="0.1" max="50" step="0.1" value="2" class="mono input flex-1" />
+              <span class="text-slate-500 text-sm">%</span>
+            </div>
+          </div>
+          <div>
+            <label class="text-xs text-slate-500 font-medium">Overall cap</label>
+            <div class="mt-1.5 flex items-center gap-2">
+              <input id="cap-overall" type="number" min="1" max="100" step="1" value="20" class="mono input flex-1" />
+              <span class="text-slate-500 text-sm">%</span>
+            </div>
+          </div>
+          <div>
+            <label class="text-xs text-slate-500 font-medium">Auto-skip on</label>
+            <div class="mt-2 flex flex-col gap-1.5 text-xs">
+              <label class="flex items-center gap-1.5 text-slate-700"><input type="checkbox" id="skip-revenge" checked> Revenge Trader</label>
+              <label class="flex items-center gap-1.5 text-slate-700"><input type="checkbox" id="skip-fomo" checked> FOMO Sizer</label>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- STEP 2 -->
+      <div class="card p-8">
+        <div class="text-xs uppercase tracking-widest text-slate-500 font-semibold mono mb-3">Step 2 — Preview what would mirror</div>
+        <button id="btn-preview" class="btn btn-secondary">Run preview poll</button>
+        <div id="preview-out" class="mt-4"></div>
+      </div>
+
+      <!-- STEP 3 -->
+      <div class="card p-8">
+        <div class="text-xs uppercase tracking-widest text-slate-500 font-semibold mono mb-3">Step 3 — Hand off to your agent</div>
+        <div class="text-sm text-slate-600 mb-4">Pick where you'll run the mirror:</div>
+        <div class="flex gap-2 flex-wrap mb-5">
+          <button class="tab-btn active" data-tab="claude">Claude Code</button>
+          <button class="tab-btn" data-tab="cursor">Cursor</button>
+          <button class="tab-btn" data-tab="codex">Codex CLI</button>
+        </div>
+        <div id="tab-body"></div>
+        <div class="text-xs text-slate-500 mt-4">Don't have the skill installed yet? <a href="/setup" class="text-blue-600 font-medium hover:underline">Open the setup guide →</a></div>
+      </div>
+    </div>`;
+
+  // wire tabs
+  const tabBody = document.getElementById('tab-body');
+  function renderTab(t) {
+    document.querySelectorAll('.tab-btn').forEach((b) => b.classList.toggle('active', b.dataset.tab === t));
+    tabBody.innerHTML = wizardForTab(t, address, chain);
+    tabBody.querySelectorAll('.copy-btn').forEach((b) => {
+      b.addEventListener('click', () => {
+        const text = b.getAttribute('data-copy') || '';
+        navigator.clipboard.writeText(text).then(() => {
+          const orig = b.textContent; b.textContent = 'copied'; b.classList.add('copied');
+          setTimeout(() => { b.textContent = orig; b.classList.remove('copied'); }, 1500);
+        });
+      });
+    });
+  }
+  document.querySelectorAll('.tab-btn').forEach((b) => b.addEventListener('click', () => renderTab(b.dataset.tab)));
+  renderTab('claude');
+
+  // wire preview
+  document.getElementById('btn-preview').addEventListener('click', () => {
+    const out = document.getElementById('preview-out');
+    const perTradePct = Number(document.getElementById('cap-per-trade').value) || 2;
+    out.innerHTML = `<div class="rounded-xl border border-slate-200 bg-slate-50/60 p-4 text-sm text-slate-500 flex items-center gap-2">
+      <svg class="animate-spin h-4 w-4 text-blue-600" viewBox="0 0 24 24" fill="none">
+        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3"></circle>
+        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v3a5 5 0 00-5 5H4z"></path>
+      </svg>
+      Polling tracker, scanning candidate tokens…
+    </div>`;
+    resetEngine();
+    const params = new URLSearchParams({ address, chain, perTradePct });
+    const es = new EventSource(`/api/mirror-preview/stream?${params}`);
+    es.addEventListener('skill', (e) => { const ev = JSON.parse(e.data); updateSkill(ev); logEvent(ev); });
+    es.addEventListener('result', (e) => { es.close(); endEngine(true); renderCandidates(out, JSON.parse(e.data)); });
+    es.addEventListener('fail', (e) => { es.close(); endEngine(false); const d = JSON.parse(e.data); out.innerHTML = `<div class="rounded-xl border border-rose-200 bg-rose-50/50 p-4 text-sm text-rose-700">${d.error || 'Preview failed.'}</div>`; });
+    es.onerror = () => { es.close(); endEngine(false); };
+  });
+}
+
+function wizardForTab(t, address, chain) {
+  const promptText = buildPrompt(address, chain);
+  const openCmd = { claude: 'claude', cursor: '# Open Cursor and start a new chat', codex: 'codex' }[t];
+  const hostName = { claude: 'Claude Code', cursor: 'Cursor', codex: 'Codex CLI' }[t];
+  const initCmd = `wallet-whisperer init ${t}`;
+  return `
+    <ol class="step-list text-sm text-slate-700">
+      <li>
+        <div class="font-semibold text-slate-900 flex items-center gap-2">
+          Install the skill into ${hostName}
+          <span class="chip green">one-line</span>
+        </div>
+        <div class="text-xs text-slate-500 mt-1 mb-3">Idempotent. Resolves the host's skills directory, copies the skill, prints the trigger phrase. Requires <span class="mono text-slate-700">npm install -g .</span> from <span class="mono text-slate-700">cli/</span>.</div>
+        <div class="rounded-xl bg-gradient-to-br from-slate-950 to-slate-900 p-5 relative overflow-hidden">
+          <div class="absolute inset-0 opacity-30" style="background: radial-gradient(circle at 10% 10%, rgba(96,165,250,0.35), transparent 50%), radial-gradient(circle at 90% 90%, rgba(139,92,246,0.30), transparent 50%);"></div>
+          <div class="relative flex items-center justify-between gap-3">
+            <div class="mono text-base text-slate-100 truncate">
+              <span class="text-emerald-400">$</span> <span class="text-slate-100">wallet-whisperer</span> <span class="text-blue-400">init</span> <span class="text-purple-300">${t}</span>
+            </div>
+            <span class="copy-btn flex-shrink-0" data-copy="${initCmd}">copy</span>
+          </div>
+        </div>
+        <div class="text-xs text-slate-500 mt-2">First time? <a href="/setup" class="text-blue-600 hover:underline font-medium">Open the full setup guide</a>.</div>
+      </li>
+      <li>
+        <div class="font-semibold text-slate-900">Open ${hostName}</div>
+        <div class="text-xs text-slate-500 mt-1 mb-2">Start a fresh session so the skill is loaded.</div>
+        <div class="codepad"><span class="flex-1"><span class="text-emerald-400">$</span> ${openCmd}</span><span class="copy-btn" data-copy="${openCmd}">copy</span></div>
+      </li>
+      <li>
+        <div class="font-semibold text-slate-900">Paste this prompt</div>
+        <div class="text-xs text-slate-500 mt-1 mb-2">${hostName} runs the pre-flight checks, then surfaces candidates one at a time.</div>
+        <div class="rounded-xl bg-slate-50 border border-slate-200 p-4 font-mono text-xs text-slate-700 whitespace-pre-line">${promptText}</div>
+        <button class="mt-3 btn btn-primary copy-btn" data-copy="${escapeAttr(promptText)}">Copy prompt</button>
+      </li>
+    </ol>
+  `;
+}
+
+function buildPrompt(address, chain) {
+  const perTradePct = Number(document.getElementById('cap-per-trade')?.value) || 2;
+  const overallPct = Number(document.getElementById('cap-overall')?.value) || 20;
+  const skipRevenge = document.getElementById('skip-revenge')?.checked ?? true;
+  const skipFomo = document.getElementById('skip-fomo')?.checked ?? true;
+  const forbidden = [skipRevenge ? 'Revenge Trader' : null, skipFomo ? 'FOMO Sizer' : null].filter(Boolean);
+  return `mirror this wallet ${address} on ${chain}.
+Per-trade cap: ${perTradePct}% of my portfolio. Overall cap: ${overallPct}%.
+Pause if the source enters ${forbidden.join(' or ') || 'any forbidden behaviour'}.
+Confirm every candidate with me before swapping.`;
+}
+
+function escapeAttr(s) { return String(s).replace(/"/g, '&quot;'); }
+
+function renderCandidates(out, data) {
+  if (!data.candidates || data.candidates.length === 0) {
+    out.innerHTML = `<div class="rounded-xl border border-slate-200 bg-slate-50/60 p-4 text-sm text-slate-500">${data.note || 'No candidates from this source right now.'}</div>`;
+    return;
+  }
+  const blocks = data.candidates.map((cand) => {
+    const isHigh = cand.riskLevel === 'HIGH' || cand.riskLevel === 'CRITICAL';
+    const isMed  = cand.riskLevel === 'MEDIUM';
+    const chip = isHigh ? 'red' : isMed ? 'yellow' : 'green';
+    const willMirror = !isHigh;
+    const decisionTone = willMirror ? 'text-emerald-700' : 'text-rose-700';
+    const decisionText = willMirror ? 'would surface' : 'would skip';
+    const flagsHtml = cand.riskFlags && cand.riskFlags.length
+      ? `<div class="mt-1 text-xs text-rose-700">flags: ${cand.riskFlags.join(', ')}</div>` : '';
+    return `
+      <div class="rounded-xl border border-slate-200 bg-white p-4 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <div class="flex items-center gap-2 flex-wrap">
+            <span class="font-semibold text-slate-900">${cand.tokenSymbol}</span>
+            <span class="mono text-xs text-slate-400">${cand.tokenContractAddress.slice(0, 6)}…${cand.tokenContractAddress.slice(-4)}</span>
+            <span class="chip ${chip}">${cand.riskLevel}</span>
+          </div>
+          <div class="text-xs text-slate-500 mt-1 truncate">
+            ${cand.quoteTokenAmount.toFixed(3)} ${cand.quoteTokenSymbol} @ ${fmtPrice(cand.tokenPrice)} · MC ${fmtUsd(cand.marketCapUsd)}
+          </div>
+          ${flagsHtml}
+        </div>
+        <div class="text-right flex-shrink-0">
+          <div class="mono text-xs text-slate-500">${cand.yourProposedSizePct}% size</div>
+          <div class="${decisionTone} text-xs font-semibold mt-0.5">${decisionText}</div>
+        </div>
+      </div>`;
+  }).join('');
+  out.innerHTML = `<div class="space-y-2">${blocks}</div><div class="mt-3 text-xs text-slate-500">Preview only. Actual swaps run after your <span class="mono text-blue-700">execute</span> reply in the agent host.</div>`;
+}
+</script>
+</body>
+</html>

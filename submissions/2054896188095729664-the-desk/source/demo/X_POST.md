@@ -1,0 +1,1 @@
+Built Agentic Wallet Ops Center for #XAgentHackathon: AI agents can propose wallet actions, but OKX Agentic Wallet only signs after a tamper-evident Black Box proves policy, risk, sizing, quote, and confirmation gates passed.

@@ -1,0 +1,33 @@
+# Render blueprint for the wallet-whisperer web app.
+# Free Web Service tier (cold-starts after ~15 min idle).
+#
+# Setup on render.com:
+#   1. New > Blueprint > pick this repo. Render reads render.yaml.
+#   2. After the service is created, go to Service > Settings > Secret Files
+#      and add a file named exactly: onchainos-session.tar.gz
+#      Contents: a gzipped tar of a logged-in onchainos session. Create it with
+#         tar -czf onchainos-session.tar.gz -C ~ .onchainos
+#   3. Manual Deploy to pick up the secret on first boot.
+#
+# The Dockerfile mounts this secret at runtime; nothing sensitive lives in the
+# git repo.
+
+services:
+  - type: web
+    name: wallet-whisperer
+    runtime: docker
+    plan: free
+    region: oregon
+    branch: main
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 4444
+      - key: LIMIT_PROFILE_PER_HOUR
+        value: "6"
+      - key: LIMIT_MIRROR_PER_HOUR
+        value: "12"

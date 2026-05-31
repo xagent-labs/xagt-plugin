@@ -1,0 +1,56 @@
+{
+  "name": "phylax-okx-agent",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "db:generate": "drizzle-kit generate",
+    "db:push": "drizzle-kit push",
+    "db:migrate": "drizzle-kit migrate",
+    "test": "npx tsx lib/__tests__/privy-auth.test.ts && npx tsx lib/__tests__/execution-foundation.test.ts && npx tsx lib/__tests__/e2e-trade-flow.test.ts && npx tsx lib/__tests__/orchestration.test.ts && npx tsx lib/__tests__/narrative.test.ts && npx tsx lib/__tests__/sse.test.ts && npx tsx lib/__tests__/smart-money.test.ts && npx tsx lib/__tests__/market-structure.test.ts && npx tsx lib/__tests__/agent-plan.test.ts && npx tsx lib/__tests__/live-trade-hardening.test.ts && npx tsx lib/__tests__/api-signals.test.ts && npx tsx lib/__tests__/api-abuse.test.ts && npx tsx lib/__tests__/wallet-boundary.test.ts && npx tsx lib/__tests__/live-execution-contract.test.ts && npx tsx lib/__tests__/approval-persistence.test.ts && npx tsx lib/__tests__/risk-quote-correctness.test.ts && npx tsx lib/__tests__/multi-chain-cleanup.test.ts && npx tsx lib/__tests__/final-security-polish.test.ts && npx tsx lib/__tests__/live-money-safety.test.ts && npx tsx lib/__tests__/live-ui-guardrails.test.ts && npx tsx lib/__tests__/live-money-readiness.test.ts && npx tsx lib/__tests__/flexible-token-swap.test.ts && npx tsx lib/__tests__/xagent-skill-integration.test.ts && npx tsx lib/__tests__/execute-risk-recheck.test.ts && npx tsx lib/__tests__/phase2-presign-simulation.test.ts",
+    "smoke:private-key": "npx tsx scripts/smoke-private-key-live.ts",
+    "smoke:private-key:live": "cross-env ENABLE_LIVE_SMOKE_TX=true npx tsx scripts/smoke-private-key-live.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.96.0",
+    "@privy-io/node": "^0.18.0",
+    "@privy-io/react-auth": "^3.26.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "drizzle-orm": "^0.45.2",
+    "framer-motion": "^12.38.0",
+    "ioredis": "^5.10.1",
+    "lucide-react": "^1.16.0",
+    "next": "16.2.6",
+    "openai": "^6.38.0",
+    "pg": "^8.20.0",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "react-markdown": "^10.1.0",
+    "rehype-sanitize": "^6.0.0",
+    "remark-gfm": "^4.0.1",
+    "tailwind-merge": "^3.6.0",
+    "viem": "^2.47.12",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/pg": "^8.20.0",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "cross-env": "^10.1.0",
+    "dotenv": "^17.4.2",
+    "drizzle-kit": "^0.31.10",
+    "eslint": "^9.39.4",
+    "eslint-config-next": "16.2.6",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
+}

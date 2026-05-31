@@ -1,0 +1,15 @@
+.git
+.gitignore
+node_modules
+*.log
+.DS_Store
+.env
+.env.local
+dist
+build
+coverage
+deploy/onchainos-session.tar.gz
+*.tar.gz
+README.md
+CHANGELOG.md
+CONTRIBUTING.md

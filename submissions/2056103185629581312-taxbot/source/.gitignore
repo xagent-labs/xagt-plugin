@@ -1,0 +1,6 @@
+node_modules/
+output/
+.env
+*.pdf
+web/.next/
+web/node_modules/

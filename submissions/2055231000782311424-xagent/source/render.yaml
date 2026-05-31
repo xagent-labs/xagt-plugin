@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: okx-defi-command-center-api
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -r ../requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: OKX_API_KEY
+        sync: false
+      - key: OKX_SECRET_KEY
+        sync: false
+      - key: OKX_PASSPHRASE
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: WALLET_ADDRESS
+        sync: false
+      - key: PORT
+        value: 10000
+      - key: ENV
+        value: production

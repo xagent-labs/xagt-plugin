@@ -1,0 +1,12 @@
+{
+  "watchlist": [
+    {
+      "handle": "@demo_smart_money_1",
+      "class": "smart-money"
+    },
+    {
+      "handle": "@demo_kol_2",
+      "class": "kol"
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+# Dependencies & build output
+node_modules
+.next
+.turbo
+.swc
+out
+dist
+coverage
+
+# Environment & secrets
+.env
+.env.local
+.env*.local
+
+# TypeScript / tooling caches
+*.tsbuildinfo
+tsconfig.tsbuildinfo
+
+# Logs & OS
+*.log
+.DS_Store
+
+# Deploy platforms
+.vercel
+
+# IDE (not required to run the site)
+.idea
+.vscode/*
+!.vscode/settings.json
+.cursor/
+
+# Agent / swarm / plugin tooling (not imported by the Next.js app)
+.claude/
+.claude-flow/
+.agents/
+.cursor-plugin/
+CLAUDE.md
+skills-lock.json
+.mcp.json

@@ -1,0 +1,715 @@
+{
+  "generatedAt": "2026-05-17T16:36:30.928Z",
+  "mode": "live-degraded",
+  "summary": {
+    "scannedSources": [
+      "DexScreener",
+      "GeckoTerminal",
+      "DexPaprika",
+      "OKX OnchainOS enrichment"
+    ],
+    "opportunityCount": 12,
+    "readyCount": 6,
+    "blockedCount": 6
+  },
+  "opportunities": [
+    {
+      "id": "dexpaprika:1:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+      "ticketId": "opp_dexpaprika_0x0fb0e40cec",
+      "status": "ready",
+      "action": "quote-buy",
+      "actionLabel": "Prepare quote for USDC",
+      "symbol": "USDC",
+      "name": "USD Coin",
+      "chain": "Ethereum",
+      "chainIndex": "1",
+      "tokenAddress": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+      "source": "DexPaprika",
+      "thesis": "dexpaprika live market data shows USDC on Ethereum: liquidity $11.87M, 24h volume $85.32M, 24h move 0.00%; ready for policy-gated OKX quote review.",
+      "invalidation": "Invalidate if liquidity drops below threshold, volume collapses, or the OKX quote/policy gate rejects the route.",
+      "confidence": 93,
+      "score": 99,
+      "freshness": "live DexPaprika top-pool snapshot",
+      "metrics": {
+        "priceUsd": 1.000002280313742,
+        "liquidityUsd": 11870769.62545836,
+        "volumeUsd": 85317926.78481837,
+        "priceChangePct": 0.00007643922060694214,
+        "buyTxCount1h": 2210,
+        "sellTxCount1h": 0
+      },
+      "risk": {
+        "level": "low",
+        "verdict": "allow",
+        "reasons": [
+          "price and liquidity cleared public-market preflight"
+        ]
+      },
+      "policy": {
+        "allowed": true,
+        "reasons": [
+          "policy allows capped quote-backed action"
+        ]
+      },
+      "proposedOrder": {
+        "mode": "quote-only",
+        "fromAsset": "USDC",
+        "toAsset": "USDC",
+        "amountUsd": 25,
+        "slippageBps": 100,
+        "quoteStatus": "not-quoted",
+        "route": "USDC -> USDC (OKX quote pending)"
+      },
+      "evidence": [
+        {
+          "source": "DexPaprika",
+          "skill": "dexpaprika",
+          "summary": "Uniswap V4 pool live on DexPaprika with $11.87M liquidity, $85.32M 24h volume, 2210 txns.",
+          "timestamp": "2026-05-17T16:36:24.838Z"
+        }
+      ]
+    },
+    {
+      "id": "dexpaprika:501:63udwyr3hcrz9tyx9towrckqzpkbkfswyhbba235fjns",
+      "ticketId": "opp_dexpaprika_7tm4a5wyuj1t",
+      "status": "ready",
+      "action": "quote-buy",
+      "actionLabel": "Prepare quote for GDOR",
+      "symbol": "GDOR",
+      "name": "Global Digital Oil Reserve",
+      "chain": "Solana",
+      "chainIndex": "501",
+      "tokenAddress": "63UdwyR3hCRz9tyx9towRCkqZpKbKFswyhBBA235fJns",
+      "source": "DexPaprika",
+      "thesis": "dexpaprika live market data shows GDOR on Solana: liquidity $335.3K, 24h volume $41.38M, 24h move -0.23%; ready for policy-gated OKX quote review.",
+      "invalidation": "Invalidate if liquidity drops below threshold, volume collapses, or the OKX quote/policy gate rejects the route.",
+      "confidence": 93,
+      "score": 99,
+      "freshness": "live DexPaprika top-pool snapshot",
+      "metrics": {
+        "priceUsd": 86.50419963529568,
+        "liquidityUsd": 335253.66435347765,
+        "volumeUsd": 41379634.73743476,
+        "priceChangePct": -0.2345537346882994,
+        "buyTxCount1h": 57782,
+        "sellTxCount1h": 0
+      },
+      "risk": {
+        "level": "low",
+        "verdict": "allow",
+        "reasons": [
+          "price and liquidity cleared public-market preflight"
+        ]
+      },
+      "policy": {
+        "allowed": true,
+        "reasons": [
+          "policy allows capped quote-backed action"
+        ]
+      },
+      "proposedOrder": {
+        "mode": "quote-only",
+        "fromAsset": "USDC",
+        "toAsset": "GDOR",
+        "amountUsd": 25,
+        "slippageBps": 100,
+        "quoteStatus": "not-quoted",
+        "route": "USDC -> GDOR (OKX quote pending)"
+      },
+      "evidence": [
+        {
+          "source": "DexPaprika",
+          "skill": "dexpaprika",
+          "summary": "PumpSwap pool live on DexPaprika with $335.3K liquidity, $41.38M 24h volume, 57782 txns.",
+          "timestamp": "2026-05-17T16:36:24.756Z"
+        }
+      ]
+    },
+    {
+      "id": "dexpaprika:8453:0x4200000000000000000000000000000000000006",
+      "ticketId": "opp_dexpaprika_0xb2cc224c1c",
+      "status": "ready",
+      "action": "quote-buy",
+      "actionLabel": "Prepare quote for WETH",
+      "symbol": "WETH",
+      "name": "Wrapped Ether",
+      "chain": "Base",
+      "chainIndex": "8453",
+      "tokenAddress": "0x4200000000000000000000000000000000000006",
+      "source": "DexPaprika",
+      "thesis": "dexpaprika live market data shows WETH on Base: liquidity $15.94M, 24h volume $77.17M, 24h move 0.67%; ready for policy-gated OKX quote review.",
+      "invalidation": "Invalidate if liquidity drops below threshold, volume collapses, or the OKX quote/policy gate rejects the route.",
+      "confidence": 93,
+      "score": 99,
+      "freshness": "live DexPaprika top-pool snapshot",
+      "metrics": {
+        "priceUsd": 2185.497765372919,
+        "liquidityUsd": 15936713.518375475,
+        "volumeUsd": 77165758.12648346,
+        "priceChangePct": 0.6672960046620681,
+        "buyTxCount1h": 18243,
+        "sellTxCount1h": 0
+      },
+      "risk": {
+        "level": "low",
+        "verdict": "allow",
+        "reasons": [
+          "price and liquidity cleared public-market preflight"
+        ]
+      },
+      "policy": {
+        "allowed": true,
+        "reasons": [
+          "policy allows capped quote-backed action"
+        ]
+      },
+      "proposedOrder": {
+        "mode": "quote-only",
+        "fromAsset": "USDC",
+        "toAsset": "WETH",
+        "amountUsd": 25,
+        "slippageBps": 100,
+        "quoteStatus": "not-quoted",
+        "route": "USDC -> WETH (OKX quote pending)"
+      },
+      "evidence": [
+        {
+          "source": "DexPaprika",
+          "skill": "dexpaprika",
+          "summary": "Aerodrome SlipStream pool live on DexPaprika with $15.94M liquidity, $77.17M 24h volume, 18243 txns.",
+          "timestamp": "2026-05-17T16:36:25.261Z"
+        }
+      ]
+    },
+    {
+      "id": "dexpaprika:8453:0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf",
+      "ticketId": "opp_dexpaprika_0x4e962bb388",
+      "status": "ready",
+      "action": "quote-buy",
+      "actionLabel": "Prepare quote for cbBTC",
+      "symbol": "cbBTC",
+      "name": "Coinbase Wrapped BTC",
+      "chain": "Base",
+      "chainIndex": "8453",
+      "tokenAddress": "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf",
+      "source": "DexPaprika",
+      "thesis": "dexpaprika live market data shows cbBTC on Base: liquidity $13.68M, 24h volume $53.36M, 24h move -0.00%; ready for policy-gated OKX quote review.",
+      "invalidation": "Invalidate if liquidity drops below threshold, volume collapses, or the OKX quote/policy gate rejects the route.",
+      "confidence": 93,
+      "score": 99,
+      "freshness": "live DexPaprika top-pool snapshot",
+      "metrics": {
+        "priceUsd": 1.0000084406308127,
+        "liquidityUsd": 13681695.417201415,
+        "volumeUsd": 53356800.531292684,
+        "priceChangePct": -0.004451807167101533,
+        "buyTxCount1h": 15507,
+        "sellTxCount1h": 0
+      },
+      "risk": {
+        "level": "low",
+        "verdict": "allow",
+        "reasons": [
+          "price and liquidity cleared public-market preflight"
+        ]
+      },
+      "policy": {
+        "allowed": true,
+        "reasons": [
+          "policy allows capped quote-backed action"
+        ]
+      },
+      "proposedOrder": {
+        "mode": "quote-only",
+        "fromAsset": "USDC",
+        "toAsset": "cbBTC",
+        "amountUsd": 25,
+        "slippageBps": 100,
+        "quoteStatus": "not-quoted",
+        "route": "USDC -> cbBTC (OKX quote pending)"
+      },
+      "evidence": [
+        {
+          "source": "DexPaprika",
+          "skill": "dexpaprika",
+          "summary": "Aerodrome SlipStream pool live on DexPaprika with $13.68M liquidity, $53.36M 24h volume, 15507 txns.",
+          "timestamp": "2026-05-17T16:36:25.261Z"
+        }
+      ]
+    },
+    {
+      "id": "dexpaprika:8453:0x53f950ae3709686d7d5a9cbb079bcb8da7a45b07",
+      "ticketId": "opp_dexpaprika_0xafea119dfb",
+      "status": "ready",
+      "action": "quote-buy",
+      "actionLabel": "Prepare quote for SpaceX",
+      "symbol": "SpaceX",
+      "name": "SpaceX",
+      "chain": "Base",
+      "chainIndex": "8453",
+      "tokenAddress": "0x53f950ae3709686d7d5a9cbb079bcb8da7a45b07",
+      "source": "DexPaprika",
+      "thesis": "dexpaprika live market data shows SpaceX on Base: liquidity $2.39M, 24h volume $27.91M, 24h move 99875.1%; ready for policy-gated OKX quote review.",
+      "invalidation": "Invalidate if liquidity drops below threshold, volume collapses, or the OKX quote/policy gate rejects the route.",
+      "confidence": 93,
+      "score": 99,
+      "freshness": "live DexPaprika top-pool snapshot",
+      "metrics": {
+        "priceUsd": 0.0000100010391791,
+        "liquidityUsd": 2388211.0314291217,
+        "volumeUsd": 27909549.35451553,
+        "priceChangePct": 99875.08371889882,
+        "buyTxCount1h": 902,
+        "sellTxCount1h": 0
+      },
+      "risk": {
+        "level": "low",
+        "verdict": "allow",
+        "reasons": [
+          "price and liquidity cleared public-market preflight"
+        ]
+      },
+      "policy": {
+        "allowed": true,
+        "reasons": [
+          "policy allows capped quote-backed action"
+        ]
+      },
+      "proposedOrder": {
+        "mode": "quote-only",
+        "fromAsset": "USDC",
+        "toAsset": "SpaceX",
+        "amountUsd": 25,
+        "slippageBps": 100,
+        "quoteStatus": "not-quoted",
+        "route": "USDC -> SpaceX (OKX quote pending)"
+      },
+      "evidence": [
+        {
+          "source": "DexPaprika",
+          "skill": "dexpaprika",
+          "summary": "Uniswap V4 pool live on DexPaprika with $2.39M liquidity, $27.91M 24h volume, 902 txns.",
+          "timestamp": "2026-05-17T16:36:25.261Z"
+        }
+      ]
+    },
+    {
+      "id": "dexpaprika:8453:0xa58396613feada987ba551422b2722c2655acb07",
+      "ticketId": "opp_dexpaprika_0x1a578f79df",
+      "status": "ready",
+      "action": "quote-buy",
+      "actionLabel": "Prepare quote for GITLAWB",
+      "symbol": "GITLAWB",
+      "name": "Gitlawb",
+      "chain": "Base",
+      "chainIndex": "8453",
+      "tokenAddress": "0xa58396613feada987ba551422b2722c2655acb07",
+      "source": "DexPaprika",
+      "thesis": "dexpaprika live market data shows GITLAWB on Base: liquidity $290.9K, 24h volume $25.76M, 24h move -0.02%; ready for policy-gated OKX quote review.",
+      "invalidation": "Invalidate if liquidity drops below threshold, volume collapses, or the OKX quote/policy gate rejects the route.",
+      "confidence": 93,
+      "score": 99,
+      "freshness": "live DexPaprika top-pool snapshot",
+      "metrics": {
+        "priceUsd": 1.0000051331349857,
+        "liquidityUsd": 290940.78519357555,
+        "volumeUsd": 25758527.526710942,
+        "priceChangePct": -0.02264759704183838,
+        "buyTxCount1h": 1262,
+        "sellTxCount1h": 0
+      },
+      "risk": {
+        "level": "low",
+        "verdict": "allow",
+        "reasons": [
+          "price and liquidity cleared public-market preflight"
+        ]
+      },
+      "policy": {
+        "allowed": true,
+        "reasons": [
+          "policy allows capped quote-backed action"
+        ]
+      },
+      "proposedOrder": {
+        "mode": "quote-only",
+        "fromAsset": "USDC",
+        "toAsset": "GITLAWB",
+        "amountUsd": 25,
+        "slippageBps": 100,
+        "quoteStatus": "not-quoted",
+        "route": "USDC -> GITLAWB (OKX quote pending)"
+      },
+      "evidence": [
+        {
+          "source": "DexPaprika",
+          "skill": "dexpaprika",
+          "summary": "Uniswap V4 pool live on DexPaprika with $290.9K liquidity, $25.76M 24h volume, 1262 txns.",
+          "timestamp": "2026-05-17T16:36:25.261Z"
+        }
+      ]
+    },
+    {
+      "id": "dexpaprika:1:0x6b175474e89094c44da98b954eedeac495271d0f",
+      "ticketId": "opp_dexpaprika_0xf6e72db545",
+      "status": "blocked",
+      "action": "watch",
+      "actionLabel": "Watch DAI",
+      "symbol": "DAI",
+      "name": "Dai Stablecoin",
+      "chain": "Ethereum",
+      "chainIndex": "1",
+      "tokenAddress": "0x6b175474e89094c44da98b954eedeac495271d0f",
+      "source": "DexPaprika",
+      "thesis": "dexpaprika live market data shows DAI on Ethereum: liquidity $n/a, 24h volume $721.44M, 24h move 0.03%; blocked by market-data preflight.",
+      "invalidation": "Do not execute until live liquidity and price data clear preflight.",
+      "confidence": 20,
+      "score": 57,
+      "freshness": "live DexPaprika top-pool snapshot",
+      "metrics": {
+        "priceUsd": 1.0002741022146744,
+        "volumeUsd": 721440455.6181422,
+        "priceChangePct": 0.026417057645272756,
+        "buyTxCount1h": 979,
+        "sellTxCount1h": 0
+      },
+      "risk": {
+        "level": "blocked",
+        "verdict": "block",
+        "reasons": [
+          "liquidity below $5k"
+        ]
+      },
+      "policy": {
+        "allowed": false,
+        "reasons": [
+          "risk veto is final: liquidity below $5k",
+          "quote slippage 250 bps exceeds policy 100 bps"
+        ]
+      },
+      "proposedOrder": {
+        "mode": "watch-only",
+        "fromAsset": "USDC",
+        "toAsset": "DAI",
+        "amountUsd": 25,
+        "slippageBps": 250,
+        "quoteStatus": "not-quoted"
+      },
+      "evidence": [
+        {
+          "source": "DexPaprika",
+          "skill": "dexpaprika",
+          "summary": "MakerDAO pool live on DexPaprika with $n/a liquidity, $721.44M 24h volume, 979 txns.",
+          "timestamp": "2026-05-17T16:36:24.837Z"
+        }
+      ]
+    },
+    {
+      "id": "dexpaprika:501:4bnivg5m62tairzsekjwfcmbj4hvgvjaurmdfh45dpd8",
+      "ticketId": "opp_dexpaprika_fnifulqmwvcq",
+      "status": "blocked",
+      "action": "watch",
+      "actionLabel": "Watch COAR",
+      "symbol": "COAR",
+      "name": "Chinese Oil Asset Reserve",
+      "chain": "Solana",
+      "chainIndex": "501",
+      "tokenAddress": "4bNiVg5M62taiRZsEKjwFcmbj4hvgvjaurMdfh45dpD8",
+      "source": "DexPaprika",
+      "thesis": "dexpaprika live market data shows COAR on Solana: liquidity $0.11, 24h volume $56.75M, 24h move -1.09%; blocked by market-data preflight.",
+      "invalidation": "Do not execute until live liquidity and price data clear preflight.",
+      "confidence": 20,
+      "score": 54,
+      "freshness": "live DexPaprika top-pool snapshot",
+      "metrics": {
+        "priceUsd": 85.87383200881463,
+        "liquidityUsd": 0.10630465301392628,
+        "volumeUsd": 56754951.71852044,
+        "priceChangePct": -1.0894041625939865,
+        "buyTxCount1h": 68683,
+        "sellTxCount1h": 0
+      },
+      "risk": {
+        "level": "blocked",
+        "verdict": "block",
+        "reasons": [
+          "liquidity below $5k"
+        ]
+      },
+      "policy": {
+        "allowed": false,
+        "reasons": [
+          "risk veto is final: liquidity below $5k",
+          "quote slippage 250 bps exceeds policy 100 bps"
+        ]
+      },
+      "proposedOrder": {
+        "mode": "watch-only",
+        "fromAsset": "USDC",
+        "toAsset": "COAR",
+        "amountUsd": 25,
+        "slippageBps": 250,
+        "quoteStatus": "not-quoted"
+      },
+      "evidence": [
+        {
+          "source": "DexPaprika",
+          "skill": "dexpaprika",
+          "summary": "PumpSwap pool live on DexPaprika with $0.11 liquidity, $56.75M 24h volume, 68683 txns.",
+          "timestamp": "2026-05-17T16:36:24.755Z"
+        }
+      ]
+    },
+    {
+      "id": "dexpaprika:501:efgfevwxgsbusyb12gb6ojtfbvxganepzgznmsm8nlgn",
+      "ticketId": "opp_dexpaprika_36svwzygp5w8",
+      "status": "blocked",
+      "action": "watch",
+      "actionLabel": "Watch COAR",
+      "symbol": "COAR",
+      "name": "Chinese Oil Asset Reserve",
+      "chain": "Solana",
+      "chainIndex": "501",
+      "tokenAddress": "EFGfEvWXGsBuSyB12Gb6oJtfBvxGanePZgzNMSm8NLGN",
+      "source": "DexPaprika",
+      "thesis": "dexpaprika live market data shows COAR on Solana: liquidity $0.01, 24h volume $51.45M, 24h move 0.39%; blocked by market-data preflight.",
+      "invalidation": "Do not execute until live liquidity and price data clear preflight.",
+      "confidence": 20,
+      "score": 53,
+      "freshness": "live DexPaprika top-pool snapshot",
+      "metrics": {
+        "priceUsd": 86.93276742293986,
+        "liquidityUsd": 0.0075690865656602,
+        "volumeUsd": 51450862.69030827,
+        "priceChangePct": 0.39171125642697513,
+        "buyTxCount1h": 46212,
+        "sellTxCount1h": 0
+      },
+      "risk": {
+        "level": "blocked",
+        "verdict": "block",
+        "reasons": [
+          "liquidity below $5k"
+        ]
+      },
+      "policy": {
+        "allowed": false,
+        "reasons": [
+          "risk veto is final: liquidity below $5k",
+          "quote slippage 250 bps exceeds policy 100 bps"
+        ]
+      },
+      "proposedOrder": {
+        "mode": "watch-only",
+        "fromAsset": "USDC",
+        "toAsset": "COAR",
+        "amountUsd": 25,
+        "slippageBps": 250,
+        "quoteStatus": "not-quoted"
+      },
+      "evidence": [
+        {
+          "source": "DexPaprika",
+          "skill": "dexpaprika",
+          "summary": "PumpSwap pool live on DexPaprika with $0.01 liquidity, $51.45M 24h volume, 46212 txns.",
+          "timestamp": "2026-05-17T16:36:24.756Z"
+        }
+      ]
+    },
+    {
+      "id": "dexpaprika:501:cfxjujdydm4pbdbeqxqssbscjx6mgfsbqzzgyb2ovezz",
+      "ticketId": "opp_dexpaprika_9f8ajsinedmg",
+      "status": "blocked",
+      "action": "watch",
+      "actionLabel": "Watch GDOR",
+      "symbol": "GDOR",
+      "name": "Global Digital Oil Reserve",
+      "chain": "Solana",
+      "chainIndex": "501",
+      "tokenAddress": "CFxjuJDydm4PBdBeqXQSSBSCJx6mGFSbQzzGYb2ovezZ",
+      "source": "DexPaprika",
+      "thesis": "dexpaprika live market data shows GDOR on Solana: liquidity $0.00, 24h volume $41.51M, 24h move -0.00%; blocked by market-data preflight.",
+      "invalidation": "Do not execute until live liquidity and price data clear preflight.",
+      "confidence": 20,
+      "score": 52,
+      "freshness": "live DexPaprika top-pool snapshot",
+      "metrics": {
+        "priceUsd": 86.84554409915546,
+        "liquidityUsd": 0.0034696009811041625,
+        "volumeUsd": 41506500.4634894,
+        "priceChangePct": -0.0015759003115759461,
+        "buyTxCount1h": 63753,
+        "sellTxCount1h": 0
+      },
+      "risk": {
+        "level": "blocked",
+        "verdict": "block",
+        "reasons": [
+          "liquidity below $5k"
+        ]
+      },
+      "policy": {
+        "allowed": false,
+        "reasons": [
+          "risk veto is final: liquidity below $5k",
+          "quote slippage 250 bps exceeds policy 100 bps"
+        ]
+      },
+      "proposedOrder": {
+        "mode": "watch-only",
+        "fromAsset": "USDC",
+        "toAsset": "GDOR",
+        "amountUsd": 25,
+        "slippageBps": 250,
+        "quoteStatus": "not-quoted"
+      },
+      "evidence": [
+        {
+          "source": "DexPaprika",
+          "skill": "dexpaprika",
+          "summary": "PumpSwap pool live on DexPaprika with $0.00 liquidity, $41.51M 24h volume, 63753 txns.",
+          "timestamp": "2026-05-17T16:36:24.756Z"
+        }
+      ]
+    },
+    {
+      "id": "dexpaprika:501:ae7bgdjwwahxzxhwnmdr286oqnjwum3wyvhbkzobtwsy",
+      "ticketId": "opp_dexpaprika_2meecpmyoavb",
+      "status": "blocked",
+      "action": "watch",
+      "actionLabel": "Watch GDOR",
+      "symbol": "GDOR",
+      "name": "Global Digital Oil Reserve",
+      "chain": "Solana",
+      "chainIndex": "501",
+      "tokenAddress": "AE7BGdjwwAhXzxHWnMdR286oqnjwUm3wyVHbkZobtWsy",
+      "source": "DexPaprika",
+      "thesis": "dexpaprika live market data shows GDOR on Solana: liquidity $0.00, 24h volume $35.69M, 24h move 0.36%; blocked by market-data preflight.",
+      "invalidation": "Do not execute until live liquidity and price data clear preflight.",
+      "confidence": 20,
+      "score": 52,
+      "freshness": "live DexPaprika top-pool snapshot",
+      "metrics": {
+        "priceUsd": 86.85789714041597,
+        "liquidityUsd": 0.00043622751566918695,
+        "volumeUsd": 35693088.93037237,
+        "priceChangePct": 0.3609851210092685,
+        "buyTxCount1h": 55574,
+        "sellTxCount1h": 0
+      },
+      "risk": {
+        "level": "blocked",
+        "verdict": "block",
+        "reasons": [
+          "liquidity below $5k"
+        ]
+      },
+      "policy": {
+        "allowed": false,
+        "reasons": [
+          "risk veto is final: liquidity below $5k",
+          "quote slippage 250 bps exceeds policy 100 bps"
+        ]
+      },
+      "proposedOrder": {
+        "mode": "watch-only",
+        "fromAsset": "USDC",
+        "toAsset": "GDOR",
+        "amountUsd": 25,
+        "slippageBps": 250,
+        "quoteStatus": "not-quoted"
+      },
+      "evidence": [
+        {
+          "source": "DexPaprika",
+          "skill": "dexpaprika",
+          "summary": "PumpSwap pool live on DexPaprika with $0.00 liquidity, $35.69M 24h volume, 55574 txns.",
+          "timestamp": "2026-05-17T16:36:24.756Z"
+        }
+      ]
+    },
+    {
+      "id": "dexpaprika:1:0xcd5fe23c85820f7b72d0926fc9b05b43e359b7ee",
+      "ticketId": "opp_dexpaprika_0x86f8742123",
+      "status": "blocked",
+      "action": "watch",
+      "actionLabel": "Watch weETH",
+      "symbol": "weETH",
+      "name": "Wrapped eETH",
+      "chain": "Ethereum",
+      "chainIndex": "1",
+      "tokenAddress": "0xcd5fe23c85820f7b72d0926fc9b05b43e359b7ee",
+      "source": "DexPaprika",
+      "thesis": "dexpaprika live market data shows weETH on Ethereum: liquidity $n/a, 24h volume $22.46M, 24h move 0.65%; blocked by market-data preflight.",
+      "invalidation": "Do not execute until live liquidity and price data clear preflight.",
+      "confidence": 20,
+      "score": 42,
+      "freshness": "live DexPaprika top-pool snapshot",
+      "metrics": {
+        "priceUsd": 2396.768173609547,
+        "volumeUsd": 22462048.049301807,
+        "priceChangePct": 0.6545495773740059,
+        "buyTxCount1h": 28,
+        "sellTxCount1h": 0
+      },
+      "risk": {
+        "level": "blocked",
+        "verdict": "block",
+        "reasons": [
+          "liquidity below $5k"
+        ]
+      },
+      "policy": {
+        "allowed": false,
+        "reasons": [
+          "risk veto is final: liquidity below $5k",
+          "quote slippage 250 bps exceeds policy 100 bps"
+        ]
+      },
+      "proposedOrder": {
+        "mode": "watch-only",
+        "fromAsset": "USDC",
+        "toAsset": "weETH",
+        "amountUsd": 25,
+        "slippageBps": 250,
+        "quoteStatus": "not-quoted"
+      },
+      "evidence": [
+        {
+          "source": "DexPaprika",
+          "skill": "dexpaprika",
+          "summary": "Fluid pool live on DexPaprika with $n/a liquidity, $22.46M 24h volume, 28 txns.",
+          "timestamp": "2026-05-17T16:36:24.838Z"
+        }
+      ]
+    }
+  ],
+  "sourceHealth": [
+    {
+      "name": "DexScreener",
+      "ok": false,
+      "command": "https://api.dexscreener.com/token-profiles/latest/v1 + https://api.dexscreener.com/token-boosts/latest/v1 + https://api.dexscreener.com/token-boosts/top/v1",
+      "error": "timeout after 5000ms",
+      "detail": "timeout after 5000ms | timeout after 5000ms | timeout after 5000ms"
+    },
+    {
+      "name": "GeckoTerminal",
+      "ok": false,
+      "command": "https://api.geckoterminal.com/api/v2/networks/eth/trending_pools | https://api.geckoterminal.com/api/v2/networks/solana/trending_pools | https://api.geckoterminal.com/api/v2/networks/base/trending_pools",
+      "error": "timeout after 5000ms",
+      "detail": "timeout after 5000ms | timeout after 5000ms | timeout after 5000ms"
+    },
+    {
+      "name": "DexPaprika",
+      "ok": true,
+      "command": "https://api.dexpaprika.com/networks/ethereum/dexes + /pools?limit=5 | https://api.dexpaprika.com/networks/solana/dexes + /pools?limit=5 | https://api.dexpaprika.com/networks/base/dexes + /pools?limit=5"
+    },
+    {
+      "name": "OKX OnchainOS enrichment",
+      "ok": false,
+      "command": "onchainos signal list --chain solana --limit 3",
+      "error": "payment/grace quota gate",
+      "detail": "{\n  \"confirming\": true,\n  \"notifications\": [\n    {\n      \"code\": \"MARKET_API_OLD_USER_POST_GRACE_OVER_QUOTA\",\n      \"data\": {\n        \"payment\": [\n          {\n            \"amount\": \"0.0005\",\n            \"asset\": \"0x[redacted-hex]\",\n            \"chainId\": 196,\n            \"isDefault\": false,\n            \"name\": \"Global Dollar\",\n            \"network\": \"eip155:196\",\n            \"payTo\": \"0x[redacted-hex]\",\n            \"symbol\": \"USDG\"\n          },\n          {\n            \"amount\": \"0.0005\",\n            \"asset\": \"0x[redacted-hex]\",\n            \"chainId\": 196,\n            \"isDefault\": false,\n      "
+    }
+  ]
+}

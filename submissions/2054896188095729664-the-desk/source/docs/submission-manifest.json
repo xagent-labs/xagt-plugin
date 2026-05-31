@@ -1,0 +1,31 @@
+{
+  "projectName": "The Desk",
+  "repoUrl": "https://github.com/Leonwenhao/the-desk",
+  "demoVideoUrl": "https://x.com/0xHermes_/status/2056159159117025545?s=20",
+  "backupRecordingUrl": "",
+  "localRecordingPath": "",
+  "xLayerContractAddress": "",
+  "xLayerCommitmentTxHash": "",
+  "xLayerExplorerUrl": "",
+  "submissionTimestamp": "",
+  "coldViewerChecks": [
+    {
+      "viewer": "",
+      "watchedAt": "",
+      "answer": "",
+      "correct": false
+    },
+    {
+      "viewer": "",
+      "watchedAt": "",
+      "answer": "",
+      "correct": false
+    },
+    {
+      "viewer": "",
+      "watchedAt": "",
+      "answer": "",
+      "correct": false
+    }
+  ]
+}

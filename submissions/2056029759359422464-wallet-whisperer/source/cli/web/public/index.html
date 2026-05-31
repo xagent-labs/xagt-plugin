@@ -1,0 +1,558 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Wallet Whisperer — Read any wallet. Mirror its style.</title>
+  <meta name="description" content="Paste any wallet. See the trader's personality, their best and worst trades, and mirror their in-character moves in your agent host." />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Poppins:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #ffffff;
+      --bg-tint: #f7faff;
+      --ink: #0a0f1a;
+      --ink-soft: #1f2937;
+      --muted: #6b7280;
+      --line: #e6ecf5;
+      --blue: #2563eb;
+      --blue-soft: #3b82f6;
+      --blue-deep: #1e40af;
+      --sky: #e0efff;
+      --highlight: #eff6ff;
+    }
+    html, body {
+      background: var(--bg);
+      color: var(--ink);
+      font-family: 'Poppins', system-ui, sans-serif;
+      font-weight: 400;
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+    }
+    .serif { font-family: 'Instrument Serif', 'Times New Roman', serif; letter-spacing: -0.012em; }
+    .mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+
+    /* —— Animated gradient blobs —— */
+    .blob-stage {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      overflow: hidden;
+      z-index: 0;
+    }
+    .blob {
+      position: absolute;
+      border-radius: 50%;
+      filter: blur(110px);
+      opacity: 0.55;
+      will-change: transform;
+    }
+    .blob.b1 {
+      width: 540px; height: 540px;
+      background: radial-gradient(circle, #60a5fa, transparent 65%);
+      top: -120px; left: 8%;
+      animation: float-a 16s ease-in-out infinite;
+    }
+    .blob.b2 {
+      width: 480px; height: 480px;
+      background: radial-gradient(circle, #93c5fd, transparent 65%);
+      top: 12%; right: 6%;
+      animation: float-b 20s ease-in-out infinite;
+    }
+    .blob.b3 {
+      width: 600px; height: 600px;
+      background: radial-gradient(circle, #c7d2fe, transparent 70%);
+      top: 40%; left: 28%;
+      animation: float-c 24s ease-in-out infinite;
+    }
+    @keyframes float-a {
+      0%,100% { transform: translate(0,0) scale(1); }
+      33%    { transform: translate(60px, 40px) scale(1.08); }
+      66%    { transform: translate(-40px, 80px) scale(0.95); }
+    }
+    @keyframes float-b {
+      0%,100% { transform: translate(0,0) scale(1); }
+      50%    { transform: translate(-50px, 60px) scale(1.06); }
+    }
+    @keyframes float-c {
+      0%,100% { transform: translate(0,0) scale(1); }
+      50%    { transform: translate(80px, -50px) scale(1.04); }
+    }
+
+    /* —— Fine grid pattern overlay (very subtle) —— */
+    .grid-overlay {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      z-index: 0;
+      background-image:
+        linear-gradient(to right, rgba(10,15,26,0.025) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(10,15,26,0.025) 1px, transparent 1px);
+      background-size: 56px 56px;
+      mask-image: radial-gradient(ellipse at center, black 30%, transparent 75%);
+    }
+
+    /* —— Entrance fade-up (load) —— */
+    .fade-up { opacity: 0; transform: translateY(16px); animation: fadeUp .95s cubic-bezier(.18,.7,.2,1) forwards; }
+    .d1 { animation-delay: .08s; } .d2 { animation-delay: .18s; } .d3 { animation-delay: .30s; }
+    .d4 { animation-delay: .42s; } .d5 { animation-delay: .56s; } .d6 { animation-delay: .72s; }
+    @keyframes fadeUp { from { opacity:0; transform: translateY(16px); } to { opacity:1; transform: translateY(0); } }
+
+    /* —— Reveal on scroll —— */
+    .reveal { opacity: 0; transform: translateY(24px); transition: opacity 1s cubic-bezier(.18,.7,.2,1), transform 1s cubic-bezier(.18,.7,.2,1); }
+    .reveal.visible { opacity: 1; transform: translateY(0); }
+
+    /* —— Pill nav buttons —— */
+    .btn { display: inline-flex; align-items: center; gap: .55rem; padding: .85rem 1.5rem; border-radius: 999px; font-weight: 500; font-size: .92rem; transition: all .25s cubic-bezier(.2,.7,.2,1); position: relative; overflow: hidden; }
+    .btn-primary { background: linear-gradient(135deg, var(--blue) 0%, var(--blue-deep) 100%); color: white; box-shadow: 0 10px 24px -10px rgba(37,99,235,0.55), inset 0 1px 0 rgba(255,255,255,0.2); }
+    .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 18px 36px -12px rgba(37,99,235,0.65), inset 0 1px 0 rgba(255,255,255,0.25); }
+    .btn-primary:active { transform: translateY(0); }
+    .btn-secondary { border: 1px solid var(--line); color: var(--ink); background: white; }
+    .btn-secondary:hover { border-color: var(--blue); color: var(--blue); transform: translateY(-2px); box-shadow: 0 10px 24px -14px rgba(37,99,235,0.35); }
+
+    /* —— Subtle shimmer on primary —— */
+    .btn-primary::after {
+      content: ''; position: absolute; inset: 0; background: linear-gradient(120deg, transparent 30%, rgba(255,255,255,0.35) 50%, transparent 70%);
+      transform: translateX(-100%); transition: transform .8s ease;
+    }
+    .btn-primary:hover::after { transform: translateX(100%); }
+
+    /* —— Cards —— */
+    .card { background: white; border: 1px solid var(--line); border-radius: 22px; transition: all .35s cubic-bezier(.18,.7,.2,1); position: relative; overflow: hidden; }
+    .card:hover { transform: translateY(-4px); border-color: rgba(37,99,235,0.35); box-shadow: 0 24px 50px -22px rgba(37,99,235,0.22); }
+    .card::before {
+      content: ''; position: absolute; inset: 0; background: radial-gradient(circle at top right, rgba(37,99,235,0.06), transparent 60%);
+      opacity: 0; transition: opacity .35s ease; pointer-events: none;
+    }
+    .card:hover::before { opacity: 1; }
+
+    /* —— Navbar glass —— */
+    .navbar { backdrop-filter: blur(18px) saturate(1.2); background: rgba(255,255,255,0.72); }
+
+    /* —— Step number circle —— */
+    .step-num {
+      width: 38px; height: 38px; border-radius: 50%;
+      background: linear-gradient(135deg, var(--blue) 0%, var(--blue-deep) 100%);
+      color: white; display: inline-flex; align-items: center; justify-content: center;
+      font-family: 'Instrument Serif', serif; font-size: 1.2rem;
+      box-shadow: 0 8px 18px -8px rgba(37,99,235,0.55);
+    }
+
+    /* —— Codepad —— */
+    .codepad {
+      background: var(--ink); color: #cbd5e1; border-radius: 12px;
+      padding: .85rem 1rem; font-family: 'JetBrains Mono', monospace; font-size: .8rem;
+      display: flex; justify-content: space-between; align-items: center; gap: .8rem;
+      transition: all .25s ease;
+    }
+    .codepad:hover { background: #111827; }
+    .copy-btn {
+      color: #94a3b8; font-size: .72rem; padding: .28rem .55rem; border-radius: 6px;
+      transition: all .18s ease; cursor: pointer; user-select: none; border: 1px solid #334155;
+      flex-shrink: 0;
+    }
+    .copy-btn:hover { background: #1f2937; color: #e0e7ff; border-color: #475569; }
+    .copy-btn.copied { color: #34d399; border-color: #34d399; background: rgba(52,211,153,0.08); }
+
+    /* —— Live terminal demo —— */
+    .terminal {
+      background: var(--ink); color: #e2e8f0; border-radius: 18px; padding: 1.6rem 1.8rem;
+      font-family: 'JetBrains Mono', monospace; font-size: .8rem; line-height: 1.7;
+      box-shadow: 0 30px 70px -30px rgba(15,23,42,0.5), 0 0 0 1px rgba(255,255,255,0.04) inset;
+      position: relative; overflow: hidden;
+    }
+    .terminal::before {
+      content: ''; position: absolute; top: 0; left: 0; right: 0; height: 36px;
+      background: linear-gradient(to bottom, rgba(255,255,255,0.04), transparent);
+      pointer-events: none;
+    }
+    .terminal .dim   { color: #64748b; }
+    .terminal .good  { color: #34d399; }
+    .terminal .blue  { color: #60a5fa; }
+    .terminal .white { color: #f1f5f9; }
+    .terminal .bar-fill  { color: #60a5fa; }
+    .terminal .bar-empty { color: #334155; }
+
+    /* —— Badge —— */
+    .badge {
+      display: inline-flex; align-items: center; gap: .35rem; padding: .25rem .7rem; border-radius: 999px;
+      font-size: .7rem; font-weight: 500;
+    }
+    .badge.green { background: #d1fae5; color: #065f46; }
+    .badge.blue  { background: #dbeafe; color: #1e40af; }
+    .badge.violet{ background: #e9e5ff; color: #4c1d95; }
+
+    /* —— Live dot pulse —— */
+    .pulse-dot {
+      width: 8px; height: 8px; border-radius: 50%; background: #34d399; position: relative; display: inline-block;
+    }
+    .pulse-dot::after {
+      content: ''; position: absolute; inset: -4px; border-radius: 50%; background: #34d399; opacity: 0.45;
+      animation: pulse 1.8s ease-out infinite;
+    }
+    @keyframes pulse { 0% { transform: scale(0.85); opacity: 0.6; } 100% { transform: scale(1.8); opacity: 0; } }
+
+    /* Smooth-scroll */
+    html { scroll-behavior: smooth; }
+
+    /* Selection */
+    ::selection { background: rgba(37,99,235,0.18); color: var(--ink); }
+
+    /* —— Install hero: cycling host name —— */
+    .install-card {
+      background: linear-gradient(135deg, #0a0f1a 0%, #0f1f3a 100%);
+      color: #e2e8f0; border-radius: 24px; padding: 2.5rem 2.5rem;
+      position: relative; overflow: hidden;
+      box-shadow: 0 30px 70px -30px rgba(15,23,42,0.5), 0 0 0 1px rgba(255,255,255,0.04) inset;
+    }
+    .install-card::before {
+      content: ''; position: absolute; inset: 0;
+      background:
+        radial-gradient(circle at 12% 18%, rgba(96,165,250,0.30), transparent 45%),
+        radial-gradient(circle at 88% 80%, rgba(139,92,246,0.30), transparent 45%);
+      pointer-events: none;
+    }
+    .install-card .terminal-prompt {
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 1.7rem; line-height: 1.4; letter-spacing: -0.01em;
+      position: relative; z-index: 1;
+    }
+    .install-card .terminal-prompt .dollar { color: #34d399; margin-right: .75rem; }
+    .install-card .terminal-prompt .cmd { color: #f1f5f9; }
+    .install-card .terminal-prompt .arg { color: #60a5fa; }
+    .install-card .terminal-prompt .host {
+      color: #c084fc; display: inline-block; min-width: 5.5ch;
+      transition: opacity .4s ease, transform .4s ease;
+    }
+    .install-card .terminal-prompt .host.swap { opacity: 0; transform: translateY(-4px); }
+    .install-card .terminal-prompt .cursor-blink {
+      display: inline-block; width: 12px; height: 1.4em; vertical-align: text-bottom;
+      background: #f1f5f9; margin-left: 6px; animation: blink 1s steps(2) infinite;
+    }
+    @keyframes blink { 50% { opacity: 0; } }
+
+    .install-hostchips {
+      display: flex; gap: .5rem; flex-wrap: wrap; margin-top: 1.5rem; position: relative; z-index: 1;
+    }
+    .install-hostchips .chip {
+      display: inline-flex; align-items: center; gap: .4rem;
+      padding: .35rem .8rem; border-radius: 999px;
+      font-family: 'JetBrains Mono', monospace; font-size: .78rem;
+      background: rgba(255,255,255,0.05); color: #cbd5e1;
+      border: 1px solid rgba(255,255,255,0.08);
+      transition: all .3s ease; cursor: default;
+    }
+    .install-hostchips .chip.active {
+      background: rgba(96,165,250,0.12); color: #93c5fd;
+      border-color: rgba(96,165,250,0.4);
+      box-shadow: 0 0 0 3px rgba(96,165,250,0.12);
+    }
+    .install-hostchips .chip .dot {
+      width: 6px; height: 6px; border-radius: 50%; background: #475569;
+      transition: all .3s ease;
+    }
+    .install-hostchips .chip.active .dot { background: #60a5fa; box-shadow: 0 0 8px #60a5fa; }
+  </style>
+</head>
+<body>
+
+  <!-- NAV -->
+  <nav class="navbar sticky top-0 z-30 border-b border-slate-200/60">
+    <div class="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
+      <a href="/" class="flex items-center gap-2.5">
+        <div class="w-8 h-8 rounded-xl bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-white text-sm font-bold shadow-lg shadow-blue-500/30">W</div>
+        <span class="font-semibold tracking-tight">Wallet Whisperer</span>
+      </a>
+      <div class="flex items-center gap-6 text-sm">
+        <a href="#how" class="text-slate-600 hover:text-slate-900 transition hidden sm:block">How it works</a>
+        <a href="#use" class="text-slate-600 hover:text-slate-900 transition hidden sm:block">Use it</a>
+        <a href="/whisper" class="btn btn-primary text-xs px-4 py-2">Open app →</a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- HERO -->
+  <section class="relative overflow-hidden">
+    <div class="blob-stage">
+      <div class="blob b1"></div>
+      <div class="blob b2"></div>
+      <div class="blob b3"></div>
+    </div>
+    <div class="grid-overlay"></div>
+
+    <div class="relative max-w-3xl mx-auto px-6 pt-24 pb-24 text-center">
+
+      <div class="fade-up inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/70 border border-blue-100 backdrop-blur text-xs text-slate-700 mb-7">
+        <span class="pulse-dot"></span>
+        Live on OKX OnchainOS
+      </div>
+
+      <h1 class="serif fade-up d1 text-[3.2rem] sm:text-[4.6rem] leading-[1.02] tracking-tight text-slate-900">
+        Know any wallet's
+        <span class="italic relative inline-block">
+          <span class="relative z-10">personality</span>
+          <svg class="absolute -bottom-2 left-0 w-full" height="14" viewBox="0 0 220 14" fill="none" preserveAspectRatio="none">
+            <path d="M3 9 Q 110 1, 217 9" stroke="url(#g1)" stroke-width="3" stroke-linecap="round" fill="none" />
+            <defs><linearGradient id="g1" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#60a5fa"/><stop offset="100%" stop-color="#2563eb"/></linearGradient></defs>
+          </svg>
+        </span>
+        <br/>
+        before you copy a single trade.
+      </h1>
+
+      <p class="fade-up d2 mt-7 text-slate-600 text-[1.08rem] leading-relaxed max-w-xl mx-auto">
+        Paste an address. In fifteen seconds you'll see how that trader actually behaves:
+        their style, sizing, sector bias, behavioural tells, and the trades they wish you didn't see.
+      </p>
+
+      <div class="fade-up d3 mt-10 flex gap-3 flex-wrap justify-center">
+        <a href="/whisper" class="btn btn-primary">
+          Try it in the browser
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
+        </a>
+        <a href="/setup" class="btn btn-secondary">
+          Setup guide
+        </a>
+      </div>
+
+      <div class="fade-up d4 mt-12 flex flex-wrap justify-center gap-x-8 gap-y-3 text-xs text-slate-500">
+        <span class="flex items-center gap-1.5"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2.5"><path d="M5 12l5 5L20 7"/></svg> Read-only, no signature</span>
+        <span class="flex items-center gap-1.5"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2.5"><path d="M5 12l5 5L20 7"/></svg> Free tier — 1M API calls / month</span>
+        <span class="flex items-center gap-1.5"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2.5"><path d="M5 12l5 5L20 7"/></svg> Mirroring needs your explicit confirm</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- TERMINAL PREVIEW -->
+  <section class="max-w-3xl mx-auto px-6 pb-24 relative z-10">
+    <div class="reveal terminal">
+      <div class="flex items-center justify-between mb-4">
+        <div class="flex items-center gap-2">
+          <span class="w-3 h-3 rounded-full bg-red-400/80"></span>
+          <span class="w-3 h-3 rounded-full bg-yellow-400/80"></span>
+          <span class="w-3 h-3 rounded-full bg-green-400/80"></span>
+        </div>
+        <span class="dim text-[.7rem]">~/wallet-whisperer</span>
+      </div>
+      <div class="dim text-[.75rem] mb-2">$ <span class="white">wallet-whisperer whisper</span> <span class="blue">21czpZ…pWM1</span></div>
+<pre class="whitespace-pre">
+<span class="dim">┌──────────────────────────────────────────────────────────────┐</span>
+<span class="dim">│</span>  <span class="white">Wallet Whisper</span>   <span class="dim">·</span>   <span class="blue">21czpZ…pWM1</span> <span class="dim">(solana)</span>                  <span class="dim">│</span>
+<span class="dim">│</span>  <span class="dim">100 closed positions  ·  194 buys / 197 sells in last 30d  │</span>
+<span class="dim">└──────────────────────────────────────────────────────────────┘</span>
+
+<span class="dim">────────────────────── PERSONA ──────────────────────</span>
+  Style           <span class="white">Day Trader</span>   <span class="dim">· median hold 1d 2h</span>
+  Sizing          <span class="white">Variable</span>     <span class="dim">· median $82  IQR $44–$129</span>
+  Sector          Solana memes <span class="dim">(pump.fun heavy rotation)</span>
+
+<span class="dim">────────────────────── EDGE ─────────────────────────</span>
+  Win rate        <span class="good">60.33% 30d</span>
+  Realized PnL    <span class="good">+$1,004</span> <span class="dim">30d</span>
+  Profit factor   2.72
+  Persona score   <span class="blue">5.8 / 10</span>  <span class="bar-fill">████████████</span><span class="bar-empty">░░░░░░░░</span>
+
+<span class="dim">────────────────────── BEHAVIORAL TELLS ─────────────</span>
+  <span class="good">●</span> <span class="white">Top-Catcher</span>          <span class="dim">4 wins exited near 24h-high</span>
+  <span class="good">●</span> <span class="white">Tactical Re-entry</span>    <span class="dim">32% of closes re-buy same ticker</span>
+</pre>
+    </div>
+  </section>
+
+  <!-- INSTALL HERO -->
+  <section id="install" class="max-w-5xl mx-auto px-6 pb-12">
+    <div class="reveal text-center mb-10">
+      <div class="mono text-xs uppercase tracking-widest text-slate-500 mb-3">One command. Any agent host.</div>
+      <h2 class="serif text-4xl sm:text-5xl tracking-tight text-slate-900">Install in one line.</h2>
+      <p class="text-slate-600 mt-4 max-w-xl mx-auto">No skills directory to remember, no per-host docs to read. Pick a host, run the command, start whispering.</p>
+    </div>
+
+    <div class="reveal install-card">
+      <div class="terminal-prompt">
+        <span class="dollar">$</span><span class="cmd">wallet-whisperer</span> <span class="arg">init</span> <span id="host-cycle" class="host">claude</span><span class="cursor-blink"></span>
+      </div>
+      <div class="install-hostchips" id="host-chips">
+        <span class="chip active" data-host="claude"><span class="dot"></span>Claude Code</span>
+        <span class="chip" data-host="cursor"><span class="dot"></span>Cursor</span>
+        <span class="chip" data-host="codex"><span class="dot"></span>Codex CLI</span>
+        <span class="chip" data-host="opencode"><span class="dot"></span>OpenCode</span>
+        <span class="chip" data-host="windsurf"><span class="dot"></span>Windsurf</span>
+        <span class="chip" data-host="agents"><span class="dot"></span>AgentSkills</span>
+      </div>
+      <div class="mt-6 text-xs text-slate-400 max-w-xl relative z-10">
+        Idempotent. Resolves the host's skills directory, copies the skill, prints the trigger phrase. Works from a cloned repo, the installed npm package, or downloads from GitHub if neither exists.
+      </div>
+    </div>
+  </section>
+
+  <!-- HOW IT WORKS -->
+  <section id="how" class="max-w-5xl mx-auto px-6 py-24">
+    <div class="reveal text-center mb-14">
+      <div class="mono text-xs uppercase tracking-widest text-slate-500 mb-3">How it works</div>
+      <h2 class="serif text-4xl sm:text-5xl tracking-tight text-slate-900">Three steps. No dashboards.</h2>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-5">
+      <div class="reveal card p-7">
+        <span class="step-num">1</span>
+        <h3 class="serif text-2xl mt-5 text-slate-900">Paste an address</h3>
+        <p class="text-slate-600 text-sm mt-2 leading-relaxed">Solana, Ethereum, Base, BSC, Arbitrum — EVM or SOL format, both work. The chain is detected automatically.</p>
+      </div>
+      <div class="reveal card p-7">
+        <span class="step-num">2</span>
+        <h3 class="serif text-2xl mt-5 text-slate-900">See the persona</h3>
+        <p class="text-slate-600 text-sm mt-2 leading-relaxed">Ninety days of DEX history reduced to one screen: style, sizing, sector tilt, tells, edge metrics, verdict.</p>
+      </div>
+      <div class="reveal card p-7">
+        <span class="step-num">3</span>
+        <h3 class="serif text-2xl mt-5 text-slate-900">Mirror on your terms</h3>
+        <p class="text-slate-600 text-sm mt-2 leading-relaxed">Optional. Set caps, hand the prompt to your agent host, and confirm every candidate trade by typing <span class="mono text-slate-900">execute</span>.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ACCESS / SURFACES -->
+  <section id="use" class="max-w-6xl mx-auto px-6 py-24">
+    <div class="reveal text-center mb-14">
+      <div class="mono text-xs uppercase tracking-widest text-slate-500 mb-3">Pick a surface</div>
+      <h2 class="serif text-4xl sm:text-5xl tracking-tight text-slate-900">Same engine. Three ways in.</h2>
+      <p class="text-slate-600 mt-4 max-w-xl mx-auto">Whisper and replay work everywhere. Mirroring (which spends money) lives in the agent skill where you can confirm each trade.</p>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-5">
+
+      <!-- WEB -->
+      <div class="reveal card p-7 flex flex-col">
+        <div class="flex items-center justify-between">
+          <span class="mono text-xs uppercase tracking-widest text-slate-500">Web</span>
+          <span class="badge green">zero install</span>
+        </div>
+        <h3 class="serif text-2xl mt-3 text-slate-900">In your browser</h3>
+        <p class="text-slate-600 text-sm mt-2 leading-relaxed flex-1">Paste an address. Get the result. Share the URL. Best for one-shot lookups and screenshots.</p>
+        <a href="/whisper" class="btn btn-primary mt-7 self-start">
+          Launch app
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
+        </a>
+      </div>
+
+      <!-- CLI -->
+      <div class="reveal card p-7 flex flex-col">
+        <div class="flex items-center justify-between">
+          <span class="mono text-xs uppercase tracking-widest text-slate-500">CLI</span>
+          <span class="badge blue">scriptable</span>
+        </div>
+        <h3 class="serif text-2xl mt-3 text-slate-900">In your terminal</h3>
+        <p class="text-slate-600 text-sm mt-2 leading-relaxed flex-1">Colored output, pipeable. Best for scripts, CI, and developers who never leave the shell.</p>
+        <a href="/setup#cli" class="btn btn-secondary mt-6 self-start">
+          Install guide
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
+        </a>
+      </div>
+
+      <!-- SKILL -->
+      <div class="reveal card p-7 flex flex-col">
+        <div class="flex items-center justify-between">
+          <span class="mono text-xs uppercase tracking-widest text-slate-500">Agent skill</span>
+          <span class="badge violet">mirror enabled</span>
+        </div>
+        <h3 class="serif text-2xl mt-3 text-slate-900">In Claude Code / Cursor</h3>
+        <p class="text-slate-600 text-sm mt-2 leading-relaxed flex-1">Same engine, plus interactive mirroring with one-tap confirmation per candidate trade. One command installs into any supported host.</p>
+        <div class="mono text-[11px] text-slate-500 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 mt-4">$ wallet-whisperer init claude</div>
+        <a href="/setup#skill" class="btn btn-secondary mt-4 self-start">
+          Install guide
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
+        </a>
+      </div>
+    </div>
+
+    <div class="reveal mt-12 text-center text-sm text-slate-500">
+      Skip the install and try it now &nbsp;·&nbsp;
+      <a href="/whisper" class="text-blue-600 font-medium underline underline-offset-4 hover:no-underline">launch the web app</a>
+    </div>
+  </section>
+
+  <!-- WHY -->
+  <section class="max-w-3xl mx-auto px-6 py-24">
+    <div class="reveal text-center mb-12">
+      <div class="mono text-xs uppercase tracking-widest text-slate-500 mb-3">Why this exists</div>
+      <h2 class="serif text-4xl sm:text-5xl tracking-tight text-slate-900">Blind copy-trading is how people lose money.</h2>
+    </div>
+    <div class="reveal space-y-5 text-slate-700 leading-relaxed text-[1.02rem]">
+      <p>You find a smart wallet. You click "mirror". You start cloning every trade — the rug pull, the compromised-key panic sell, the revenge trade after a loss.</p>
+      <p>Wallet Whisperer flips the order. It <em class="italic text-slate-900">learns</em> the wallet's actual style first, then uses that style as a filter. Trades that don't fit get skipped. Trades that fit are scanned for honeypots, sized to your caps, and surfaced for your <em class="italic text-slate-900">explicit</em> approval. Nothing ever executes on its own.</p>
+    </div>
+    <div class="reveal mt-10 text-center">
+      <a href="/whisper" class="btn btn-primary">
+        Profile a wallet now
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
+      </a>
+    </div>
+  </section>
+
+  <!-- FOOTER -->
+  <footer class="border-t border-slate-200 mt-10 bg-gradient-to-b from-white to-slate-50/50">
+    <div class="max-w-5xl mx-auto px-6 py-10 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-500">
+      <span class="mono">wallet-whisperer · v1.0.0</span>
+      <span>Built on OKX OnchainOS · MIT licensed</span>
+      <a href="https://github.com/Temitope15/wallet-whisperer" target="_blank" rel="noopener" class="text-slate-600 hover:text-blue-600 transition inline-flex items-center gap-1.5">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.56 0-.27-.01-1-.02-1.96-3.2.7-3.88-1.54-3.88-1.54-.52-1.33-1.28-1.69-1.28-1.69-1.05-.72.08-.71.08-.71 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.7 0-1.26.45-2.29 1.19-3.1-.12-.29-.51-1.46.11-3.04 0 0 .97-.31 3.18 1.18.92-.26 1.91-.39 2.89-.39.98 0 1.97.13 2.89.39 2.21-1.49 3.18-1.18 3.18-1.18.62 1.58.23 2.75.11 3.04.74.81 1.19 1.84 1.19 3.1 0 4.43-2.7 5.41-5.27 5.7.41.35.77 1.05.77 2.11 0 1.52-.01 2.74-.01 3.11 0 .31.21.67.8.56C20.21 21.39 23.5 17.08 23.5 12 23.5 5.65 18.35.5 12 .5z"/></svg>
+        GitHub →
+      </a>
+    </div>
+  </footer>
+
+<script>
+  // Intersection-based reveal
+  const io = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (e.isIntersecting) { e.target.classList.add('visible'); io.unobserve(e.target); }
+    }
+  }, { threshold: 0.1, rootMargin: '0px 0px -60px 0px' });
+  document.querySelectorAll('.reveal').forEach((el) => io.observe(el));
+
+  // Clipboard copy
+  document.querySelectorAll('.copy-btn').forEach((b) => {
+    b.addEventListener('click', () => {
+      const text = b.getAttribute('data-copy') || '';
+      navigator.clipboard.writeText(text).then(() => {
+        const original = b.textContent;
+        b.textContent = 'copied';
+        b.classList.add('copied');
+        setTimeout(() => { b.textContent = original; b.classList.remove('copied'); }, 1500);
+      });
+    });
+  });
+
+  // Cycling host name in the install hero
+  (function () {
+    const hostEl = document.getElementById('host-cycle');
+    const chips = document.querySelectorAll('#host-chips .chip');
+    if (!hostEl || !chips.length) return;
+    const hosts = Array.from(chips).map((c) => c.dataset.host);
+    let i = 0;
+    setInterval(() => {
+      i = (i + 1) % hosts.length;
+      hostEl.classList.add('swap');
+      setTimeout(() => {
+        hostEl.textContent = hosts[i];
+        hostEl.classList.remove('swap');
+        chips.forEach((c) => c.classList.toggle('active', c.dataset.host === hosts[i]));
+      }, 220);
+    }, 2200);
+  })();
+
+  // Subtle parallax on blobs
+  const stage = document.querySelector('.blob-stage');
+  if (stage) {
+    document.addEventListener('mousemove', (e) => {
+      const x = (e.clientX / window.innerWidth - 0.5) * 16;
+      const y = (e.clientY / window.innerHeight - 0.5) * 16;
+      stage.style.transform = `translate(${x}px, ${y}px)`;
+      stage.style.transition = 'transform .4s ease-out';
+    });
+  }
+</script>
+</body>
+</html>

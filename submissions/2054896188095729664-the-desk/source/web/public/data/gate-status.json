@@ -1,0 +1,21 @@
+[
+  {
+    "ticketId": "ticket_clean_xlayer",
+    "allowed": true,
+    "errors": [],
+    "warnings": []
+  },
+  {
+    "ticketId": "ticket_rugcat_solana",
+    "allowed": false,
+    "errors": [
+      "missing required event: allocation.sized",
+      "missing required event: route.quoted",
+      "missing required event: quote.simulation",
+      "missing required event: user.confirmed",
+      "risk veto is final: dev wallet rug history and concentrated holder cluster",
+      "missing user confirmation"
+    ],
+    "warnings": []
+  }
+]

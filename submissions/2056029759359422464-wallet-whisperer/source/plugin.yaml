@@ -1,0 +1,23 @@
+schema_version: 1
+name: wallet-whisperer
+version: "1.0.0"
+description: "Reverse-engineer any wallet's trading personality, narrate their best & worst trades, then mirror their verified style with risk-managed automation."
+author:
+  name: "Temitope Akinsunmade"
+  github: "Temitope15"
+license: MIT
+category: analytics
+tags:
+  - wallet-analysis
+  - copy-trading
+  - smart-money
+  - trading-persona
+  - behavioral-finance
+  - signal-mirror
+  - okx
+
+components:
+  skill:
+    dir: skills/wallet-whisperer
+
+api_calls: []

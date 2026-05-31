@@ -1,0 +1,58 @@
+//! HTTP API for sandboxed.sh.
+//!
+//! ## Endpoints
+//!
+//! - `POST /api/task` - Submit a new task
+//! - `GET /api/task/{id}` - Get task status and result
+//! - `GET /api/task/{id}/stream` - Stream task progress via SSE
+//! - `GET /api/health` - Health check
+//! - `GET /api/providers` - List available providers
+//! - `GET /api/mcp` - List all MCP servers
+//! - `POST /api/mcp` - Add a new MCP server
+//! - `DELETE /api/mcp/{id}` - Remove an MCP server
+//! - `POST /api/mcp/{id}/enable` - Enable an MCP server
+//! - `POST /api/mcp/{id}/disable` - Disable an MCP server
+//! - `GET /api/tools` - List all tools (built-in + MCP)
+//! - `POST /api/tools/{name}/toggle` - Enable/disable a tool
+
+pub mod ai_providers;
+mod auth;
+pub mod automation_variables;
+pub mod backends;
+pub mod claudecode;
+mod console;
+pub mod control;
+pub mod control_metrics;
+pub mod deferred_proxy;
+pub mod desktop;
+mod desktop_stream;
+pub mod durable_jobs;
+pub mod fido;
+mod fs;
+mod github_auth;
+pub(crate) mod grok_goal;
+pub mod library;
+pub mod mcp;
+pub mod metadata_llm;
+pub mod mission_runner;
+pub mod mission_store;
+pub mod mission_workspace_gc;
+mod model_routing;
+mod monitoring;
+mod native_loop_observer;
+pub mod opencode;
+pub mod paloma;
+mod provider_usage_cache;
+mod providers;
+pub(crate) mod proxy;
+mod proxy_keys;
+mod routes;
+pub mod secrets;
+pub mod settings;
+pub mod system;
+pub mod telegram;
+pub mod types;
+pub mod workspaces;
+
+pub use routes::serve;
+pub use types::*;
