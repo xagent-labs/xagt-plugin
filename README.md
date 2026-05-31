@@ -1,5 +1,11 @@
 # Build with XAgent × OKX
 
+> ## Hackathon — join us at [xagt.ai/hackathon](https://xagt.ai/hackathon)
+>
+> ![X-Agent Hackathon](docs/images/hackathon-banner.png)
+>
+> Build the next X-Agent plugin and ship it to the marketplace. Past submissions live in [`submissions/`](./submissions/). 6,000 USDT prize pool.
+
 One command. Browser opens, you log in (= registered), OKX skill suite installs into your agent (Cursor / Claude Code / OpenClaw). Go build.
 
 ```bash
